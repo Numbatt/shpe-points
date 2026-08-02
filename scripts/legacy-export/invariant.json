@@ -1,0 +1,68 @@
+{
+  "exported_at": "2026-07-31T02:17:43.227Z",
+  "invariant": {
+    "members": 303,
+    "total_points": 1013,
+    "points_from_events": 901,
+    "points_from_adjustments": 0,
+    "points_from_role": 112,
+    "max_total": 29,
+    "zero_point_members": 7
+  },
+  "results": [
+    {
+      "relation": "Members",
+      "exported": 303,
+      "expected": 303,
+      "ok": true
+    },
+    {
+      "relation": "Events",
+      "exported": 28,
+      "expected": 28,
+      "ok": true
+    },
+    {
+      "relation": "Attendance",
+      "exported": 840,
+      "expected": 840,
+      "ok": true
+    },
+    {
+      "relation": "Event Categories",
+      "exported": 3,
+      "expected": 3,
+      "ok": true
+    },
+    {
+      "relation": "E-board and Chairs",
+      "exported": 30,
+      "expected": 30,
+      "ok": true
+    },
+    {
+      "relation": "Adjustments",
+      "exported": 0,
+      "expected": 0,
+      "ok": true
+    },
+    {
+      "relation": "attendance_staging",
+      "exported": 0,
+      "expected": 0,
+      "ok": true
+    },
+    {
+      "relation": "member_totals_all_time",
+      "exported": 303,
+      "expected": 303,
+      "ok": true
+    },
+    {
+      "relation": "attendance_with_details",
+      "exported": 840,
+      "expected": 840,
+      "ok": true
+    }
+  ]
+}
