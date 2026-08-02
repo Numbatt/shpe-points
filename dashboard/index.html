@@ -159,6 +159,39 @@
     border-radius: 3px; font-size: 11px; color: var(--muted);
     text-transform: uppercase; letter-spacing: .06em;
   }
+
+  /* ---- year switcher ---------------------------------------------------- */
+  /* The current year is the one piece of global state every screen keys off, so it doubles as
+     the control that changes it. Switching and creating live where the year is already shown
+     rather than behind a tab. */
+  .yearsel { position: relative; display: inline-flex; }
+  button.pill { font: inherit; font-size: 11px; cursor: pointer; background: none; line-height: 1.5; }
+  button.pill:hover { border-color: var(--ink); color: var(--ink); }
+  button.pill::after { content: ""; display: inline-block; margin-left: 6px; border: 3px solid transparent; border-top-color: currentColor; transform: translateY(2px); }
+
+  .menu {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 210px;
+    background: var(--bg); border: 1px solid var(--line-strong); border-radius: 4px;
+    box-shadow: 0 6px 20px rgb(0 0 0 / .09); padding: 4px 0;
+  }
+  .menu button {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    background: none; border: 0; padding: 7px 12px; font: inherit; font-size: 14px;
+    color: var(--ink); cursor: pointer;
+  }
+  .menu button:hover { background: var(--sunken); }
+  .menu button .tick { color: var(--muted); margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .menu .sep { border-top: 1px solid var(--line); margin: 4px 0; }
+
+  dialog {
+    border: 1px solid var(--line-strong); border-radius: 5px; padding: 0;
+    background: var(--bg); color: var(--ink); max-width: 92vw; width: 420px;
+  }
+  dialog::backdrop { background: rgb(0 0 0 / .28); }
+  dialog h2 { margin: 0; font-size: 15px; font-weight: 600; padding: 18px 20px 0; }
+  dialog .body { padding: 16px 20px 20px; display: grid; gap: 12px; }
+  dialog label { display: grid; gap: 5px; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .09em; }
+  dialog .foot { display: flex; gap: 8px; justify-content: flex-end; padding: 0 20px 20px; }
   .empty { color: var(--faint); font-size: 14px; }
   .none { color: var(--faint); }
   .err { color: var(--danger); }
@@ -187,6 +220,35 @@
 
 <div id="app"></div>
 <div id="toast"></div>
+
+<!--
+  Native <dialog>: Escape to close, focus trapping and the backdrop are all browser behaviour.
+  A hand-rolled modal would be more code and worse, and a library is not an option here.
+-->
+<dialog id="year-dialog">
+  <h2>Start a new academic year</h2>
+  <div class="body">
+    <label>Year
+      <input id="y-id" placeholder="2027-28">
+    </label>
+    <label>Starts
+      <input id="y-start" type="date">
+    </label>
+    <label>Ends
+      <input id="y-end" type="date">
+    </label>
+    <label>Drive folder holding this year's sign-in forms
+      <input id="y-folder" placeholder="Folder ID, optional">
+    </label>
+    <label class="check" style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:6px">
+      <input type="checkbox" id="y-current" checked> Make it the current year
+    </label>
+  </div>
+  <div class="foot">
+    <button class="ghost" id="y-cancel">Cancel</button>
+    <button class="act" id="y-create">Create year</button>
+  </div>
+</dialog>
 
 <script>
 // ---------------------------------------------------------------------------
@@ -971,6 +1033,92 @@ async function renderAdjustments(root) {
 // point of the no-manual-changes rule (docs/DESIGN.md): a non-technical officer creates next
 // year, points it at its Drive folder, and switches to it, entirely from this screen.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Year switcher — the header pill is the control, not just a label.
+// ---------------------------------------------------------------------------
+
+/** Switch the current year. Every screen keys off it, so re-render whatever is open. */
+async function setCurrentYear(id) {
+  await patch('app_config?key=eq.current_year_id', { value: id });
+  state.currentYear = id;
+  el('year-pill').textContent = id;
+  closeYearMenu();
+  toast(`${id} is now the current year.`);
+  show(state.tab);
+}
+
+function closeYearMenu() {
+  const menu = el('year-menu');
+  if (!menu) return;
+  menu.hidden = true;
+  el('year-pill').setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', onDocClickForYearMenu, true);
+}
+
+/** Any click outside the switcher dismisses it, the way a menu is expected to behave. */
+function onDocClickForYearMenu(e) {
+  if (!e.target.closest('.yearsel')) closeYearMenu();
+}
+
+async function toggleYearMenu() {
+  const menu = el('year-menu');
+  if (!menu.hidden) return closeYearMenu();
+
+  const years = await get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc');
+
+  menu.innerHTML = `
+    ${years.map((y) => `
+      <button role="menuitem" data-year="${esc(y.id)}">
+        ${esc(y.id)}${y.id === state.currentYear ? '<span class="tick">current</span>' : ''}
+      </button>`).join('')}
+    <div class="sep"></div>
+    <button role="menuitem" id="y-new">Start a new academic year</button>`;
+
+  menu.querySelectorAll('[data-year]').forEach((b) => b.onclick = () => guard(async () => {
+    if (b.dataset.year === state.currentYear) return closeYearMenu();
+    await setCurrentYear(b.dataset.year);
+  }));
+  el('y-new').onclick = () => { closeYearMenu(); openYearDialog(); };
+
+  menu.hidden = false;
+  el('year-pill').setAttribute('aria-expanded', 'true');
+  // Capture phase, so the listener sees the click before a re-render detaches the target.
+  document.addEventListener('click', onDocClickForYearMenu, true);
+}
+
+function openYearDialog() {
+  const d = el('year-dialog');
+  ['y-id', 'y-start', 'y-end', 'y-folder'].forEach((id) => el(id).value = '');
+  el('y-current').checked = true;
+  d.showModal();
+}
+
+function wireYearDialog() {
+  const d = el('year-dialog');
+  el('y-cancel').onclick = () => d.close();
+  el('y-create').onclick = () => guard(async () => {
+    const id = el('y-id').value.trim();
+    const startsOn = el('y-start').value;
+    const endsOn = el('y-end').value;
+    if (!id || !startsOn || !endsOn) return toast('Year, start date and end date are all required.', true);
+    // p_copy_bonuses_from is deliberately omitted: the RPC defaults to the most recently started
+    // year, which is what "role bonus values carry over" means. Roles and memberships are never
+    // copied, per docs/DESIGN.md and the migration itself.
+    await rpc('create_academic_year', {
+      p_id: id, p_starts_on: startsOn, p_ends_on: endsOn,
+      p_forms_folder_id: el('y-folder').value.trim() || null,
+      p_make_current: el('y-current').checked,
+    });
+    if (el('y-current').checked) {
+      state.currentYear = id;
+      el('year-pill').textContent = id;
+    }
+    d.close();
+    toast(`Created ${id}.`);
+    show(state.tab);
+  });
+}
+
 async function renderYears(root) {
   const years = await get('academic_years?select=id,starts_on,ends_on,forms_folder_id&order=starts_on.desc');
 
@@ -997,19 +1145,9 @@ async function renderYears(root) {
           </tr>`).join('')}
         </tbody>
       </table></div>
-    </div>
-
-    <div class="card">
-      <h2>Create a new academic year</h2>
-      <div class="row">
-        <input id="y-id" placeholder="2027-28" size="9">
-        <input id="y-start" type="date">
-        <input id="y-end" type="date">
-        <input id="y-folder" placeholder="Forms folder ID (optional)" size="26">
-        <label class="check"><input type="checkbox" id="y-current"> make current</label>
-        <button class="act" id="y-create">Create year</button>
-      </div>
     </div>`;
+  // Creating a year and switching the current one both live in the header switcher. They are
+  // not duplicated here: the same control in two places is how two behaviours drift apart.
 
   root.querySelectorAll('[data-savefolder]').forEach((b) => b.onclick = () => guard(async () => {
     const id = b.dataset.savefolder;
@@ -1019,36 +1157,8 @@ async function renderYears(root) {
     show('years');
   }));
 
-  root.querySelectorAll('[data-makecurrent]').forEach((b) => b.onclick = () => guard(async () => {
-    const id = b.dataset.makecurrent;
-    await patch('app_config?key=eq.current_year_id', { value: id });
-    state.currentYear = id;
-    el('year-pill').textContent = id;
-    toast(`${id} is now the current year.`);
-    show('years');
-  }));
-
-  el('y-create').onclick = () => guard(async () => {
-    const id = el('y-id').value.trim();
-    const startsOn = el('y-start').value;
-    const endsOn = el('y-end').value;
-    const folder = el('y-folder').value.trim();
-    const makeCurrent = el('y-current').checked;
-    if (!id || !startsOn || !endsOn) return toast('Year ID, start date and end date are required.', true);
-    // p_copy_bonuses_from is deliberately omitted: the RPC defaults to the most recently
-    // started year, which is what "role bonus values carry over from the previous year" means.
-    // Roles and memberships are never copied, per docs/DESIGN.md and the migration itself.
-    await rpc('create_academic_year', {
-      p_id: id, p_starts_on: startsOn, p_ends_on: endsOn,
-      p_forms_folder_id: folder || null, p_make_current: makeCurrent,
-    });
-    if (makeCurrent) {
-      state.currentYear = id;
-      el('year-pill').textContent = id;
-    }
-    toast(`Created ${id}.`);
-    show('years');
-  });
+  root.querySelectorAll('[data-makecurrent]').forEach((b) => b.onclick = () =>
+    guard(() => setCurrentYear(b.dataset.makecurrent)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1089,7 +1199,10 @@ async function boot() {
            itself. The heading stays for screen readers and the document outline. -->
       <h1 class="sr-only">SHPE Points</h1>
       <span class="mark">${logoMark()}</span>
-      <span class="pill" id="year-pill"></span>
+      <span class="yearsel">
+        <button class="pill" id="year-pill" aria-haspopup="menu" aria-expanded="false"></button>
+        <div class="menu" id="year-menu" role="menu" hidden></div>
+      </span>
       <span class="spacer"></span>
       <span class="who">${esc(session.email)}</span>
       <button class="ghost" id="signout">Sign out</button>
@@ -1099,6 +1212,8 @@ async function boot() {
 
   el('signout').onclick = signOut;
   document.querySelectorAll('nav button').forEach((b) => b.onclick = () => show(b.dataset.tab));
+  el('year-pill').onclick = () => guard(toggleYearMenu);
+  wireYearDialog();
 
   try {
     const [types, config] = await Promise.all([
