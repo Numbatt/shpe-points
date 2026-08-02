@@ -180,8 +180,23 @@
     color: var(--ink); cursor: pointer;
   }
   .menu button:hover { background: var(--sunken); }
-  .menu button .tick { color: var(--muted); margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
   .menu .sep { border-top: 1px solid var(--line); margin: 4px 0; }
+
+  /* A row is two controls: pick the year, or open its settings. They cannot be nested buttons,
+     so the row is a flex container and the hover highlight moves to it. */
+  .menurow { display: flex; align-items: center; }
+  .menurow:hover { background: var(--sunken); }
+  .menurow button:hover { background: none; }
+  .menurow .pick { flex: 1; }
+  /* The current year is muted rather than labelled: it is the one row that does nothing when
+     clicked, and greying it says that without spending a word on it. */
+  .menurow .pick.is-current { color: var(--muted); }
+  .menu .gear {
+    width: auto; flex: none; padding: 7px 12px 7px 6px; color: var(--faint);
+    opacity: 0; transition: opacity .12s;
+  }
+  .menurow:hover .gear, .menu .gear:focus-visible { opacity: 1; }
+  .menu .gear:hover { color: var(--ink); }
 
   dialog {
     border: 1px solid var(--line-strong); border-radius: 5px; padding: 0;
@@ -226,7 +241,7 @@
   A hand-rolled modal would be more code and worse, and a library is not an option here.
 -->
 <dialog id="year-dialog">
-  <h2>Start a new academic year</h2>
+  <h2 id="y-title">Start a new academic year</h2>
   <div class="body">
     <label>Year
       <input id="y-id" placeholder="2027-28">
@@ -240,13 +255,13 @@
     <label>Drive folder holding this year's sign-in forms
       <input id="y-folder" placeholder="Folder ID, optional">
     </label>
-    <label class="check" style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:6px">
+    <label class="check" id="y-current-row" style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="y-current" checked> Make it the current year
     </label>
   </div>
   <div class="foot">
     <button class="ghost" id="y-cancel">Cancel</button>
-    <button class="act" id="y-create">Create year</button>
+    <button class="act" id="y-save">Create year</button>
   </div>
 </dialog>
 
@@ -383,7 +398,6 @@ const TABS = [
   ['standings', 'Standings'],
   ['roster', 'Roster'],
   ['roles', 'Roles'],
-  ['years', 'Years'],
   ['adjustments', 'Adjustments'],
 ];
 
@@ -1035,7 +1049,22 @@ async function renderAdjustments(root) {
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Year switcher — the header pill is the control, not just a label.
+//
+// This replaced a whole tab. Everything about an academic year (which one is current, its dates,
+// which Drive folder holds its forms, and creating the next one) is reachable from the thing that
+// displays the year, which is where an officer already looks for it.
 // ---------------------------------------------------------------------------
+
+/** Inline so the file stays dependency-free. Sized in em so it tracks the row's font. */
+const GEAR =
+  '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/>' +
+  '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 ' +
+  '1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 ' +
+  '1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 ' +
+  '4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 ' +
+  '0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 ' +
+  '1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 
 /** Switch the current year. Every screen keys off it, so re-render whatever is open. */
 async function setCurrentYear(id) {
@@ -1064,13 +1093,15 @@ async function toggleYearMenu() {
   const menu = el('year-menu');
   if (!menu.hidden) return closeYearMenu();
 
-  const years = await get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc');
+  const years = await get('academic_years?select=id,starts_on,ends_on,forms_folder_id&order=starts_on.desc');
 
   menu.innerHTML = `
     ${years.map((y) => `
-      <button role="menuitem" data-year="${esc(y.id)}">
-        ${esc(y.id)}${y.id === state.currentYear ? '<span class="tick">current</span>' : ''}
-      </button>`).join('')}
+      <div class="menurow">
+        <button class="pick${y.id === state.currentYear ? ' is-current' : ''}" role="menuitem"
+                data-year="${esc(y.id)}">${esc(y.id)}</button>
+        <button class="gear" data-config="${esc(y.id)}" aria-label="Configure ${esc(y.id)}">${GEAR}</button>
+      </div>`).join('')}
     <div class="sep"></div>
     <button role="menuitem" id="y-new">Start a new academic year</button>`;
 
@@ -1078,7 +1109,12 @@ async function toggleYearMenu() {
     if (b.dataset.year === state.currentYear) return closeYearMenu();
     await setCurrentYear(b.dataset.year);
   }));
-  el('y-new').onclick = () => { closeYearMenu(); openYearDialog(); };
+  menu.querySelectorAll('[data-config]').forEach((b) => b.onclick = () => {
+    const y = years.find((v) => v.id === b.dataset.config);
+    closeYearMenu();
+    openYearDialog(y);
+  });
+  el('y-new').onclick = () => { closeYearMenu(); openYearDialog(null); };
 
   menu.hidden = false;
   el('year-pill').setAttribute('aria-expanded', 'true');
@@ -1086,28 +1122,57 @@ async function toggleYearMenu() {
   document.addEventListener('click', onDocClickForYearMenu, true);
 }
 
-function openYearDialog() {
+/** Null opens the create form; a year row opens the same dialog to edit that year. */
+let editingYear = null;
+
+function openYearDialog(year) {
+  editingYear = year;
   const d = el('year-dialog');
-  ['y-id', 'y-start', 'y-end', 'y-folder'].forEach((id) => el(id).value = '');
+
+  el('y-id').value = year ? year.id : '';
+  el('y-start').value = year ? year.starts_on : '';
+  el('y-end').value = year ? year.ends_on : '';
+  el('y-folder').value = year ? (year.forms_folder_id || '') : '';
+
+  // The year ID is the primary key every membership, role and bonus row points at. Renaming it
+  // is a real operation, not a settings tweak, so it is read-only once the year exists.
+  el('y-id').disabled = !!year;
+  // Switching years is what clicking the row does. Offering it here too would be two paths to
+  // one action, which is how two behaviours drift apart.
+  el('y-current-row').hidden = !!year;
   el('y-current').checked = true;
+
+  el('y-title').textContent = year ? `Configure ${year.id}` : 'Start a new academic year';
+  el('y-save').textContent = year ? 'Save' : 'Create year';
   d.showModal();
 }
 
 function wireYearDialog() {
   const d = el('year-dialog');
   el('y-cancel').onclick = () => d.close();
-  el('y-create').onclick = () => guard(async () => {
-    const id = el('y-id').value.trim();
+
+  el('y-save').onclick = () => guard(async () => {
     const startsOn = el('y-start').value;
     const endsOn = el('y-end').value;
+    const folder = el('y-folder').value.trim() || null;
+
+    if (editingYear) {
+      if (!startsOn || !endsOn) return toast('Start and end dates are both required.', true);
+      await patch(`academic_years?id=eq.${encodeURIComponent(editingYear.id)}`,
+        { starts_on: startsOn, ends_on: endsOn, forms_folder_id: folder });
+      d.close();
+      toast(`Saved ${editingYear.id}.`);
+      return show(state.tab);
+    }
+
+    const id = el('y-id').value.trim();
     if (!id || !startsOn || !endsOn) return toast('Year, start date and end date are all required.', true);
     // p_copy_bonuses_from is deliberately omitted: the RPC defaults to the most recently started
     // year, which is what "role bonus values carry over" means. Roles and memberships are never
     // copied, per docs/DESIGN.md and the migration itself.
     await rpc('create_academic_year', {
       p_id: id, p_starts_on: startsOn, p_ends_on: endsOn,
-      p_forms_folder_id: el('y-folder').value.trim() || null,
-      p_make_current: el('y-current').checked,
+      p_forms_folder_id: folder, p_make_current: el('y-current').checked,
     });
     if (el('y-current').checked) {
       state.currentYear = id;
@@ -1119,54 +1184,12 @@ function wireYearDialog() {
   });
 }
 
-async function renderYears(root) {
-  const years = await get('academic_years?select=id,starts_on,ends_on,forms_folder_id&order=starts_on.desc');
-
-  root.innerHTML = `
-    <div class="card">
-      <h2>Academic years</h2>
-      <div class="scroll"><table>
-        <thead><tr><th>Year</th><th>Starts</th><th>Ends</th><th>Forms folder</th><th>Current</th></tr></thead>
-        <tbody>${years.map((y) => `
-          <tr>
-            <td><code>${esc(y.id)}</code></td>
-            <td>${esc(y.starts_on)}</td>
-            <td>${esc(y.ends_on)}</td>
-            <td>
-              <div class="row">
-                <input id="folder-${esc(y.id)}" value="${esc(y.forms_folder_id || '')}" placeholder="Drive folder ID" size="24">
-                <button class="ghost" data-savefolder="${esc(y.id)}">Save</button>
-              </div>
-              ${y.forms_folder_id ? '' : '<div class="none" style="margin-top:4px;font-size:12px">Not polled</div>'}
-            </td>
-            <td>${y.id === state.currentYear
-              ? '<span class="pill">current</span>'
-              : `<button class="ghost" data-makecurrent="${esc(y.id)}">Make current</button>`}</td>
-          </tr>`).join('')}
-        </tbody>
-      </table></div>
-    </div>`;
-  // Creating a year and switching the current one both live in the header switcher. They are
-  // not duplicated here: the same control in two places is how two behaviours drift apart.
-
-  root.querySelectorAll('[data-savefolder]').forEach((b) => b.onclick = () => guard(async () => {
-    const id = b.dataset.savefolder;
-    const folder = el(`folder-${id}`).value.trim();
-    await patch(`academic_years?id=eq.${encodeURIComponent(id)}`, { forms_folder_id: folder || null });
-    toast(`Saved forms folder for ${id}.`);
-    show('years');
-  }));
-
-  root.querySelectorAll('[data-makecurrent]').forEach((b) => b.onclick = () =>
-    guard(() => setCurrentYear(b.dataset.makecurrent)));
-}
-
 // ---------------------------------------------------------------------------
 // Shell
 // ---------------------------------------------------------------------------
 const SCREENS = {
   attention: renderAttention, volunteering: renderVolunteering, standings: renderStandings,
-  roster: renderRoster, roles: renderRoles, years: renderYears, adjustments: renderAdjustments,
+  roster: renderRoster, roles: renderRoles, adjustments: renderAdjustments,
 };
 
 async function show(tab) {
