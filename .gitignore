@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Legacy exports contain member PII (netIDs, emails, birthdays).
+# Kept locally as a safety net before schema changes; never committed.
+scripts/legacy-export/*.csv
+.gstack/
+
+# Per-machine Claude Code settings.
+.claude/settings.local.json
