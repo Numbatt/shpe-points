@@ -495,6 +495,16 @@ poller stops holding a folder ID at all; it asks the Edge Function which folders
 Edge Function answers from `academic_years.forms_folder_id`. Apps Script keeps only `INGEST_URL`
 and `INGEST_SECRET`, neither of which ever changes.
 
+**The poller walks subfolders**, because the chapter files sign-in forms by term: the year's
+"Sign In Forms" folder holds "Fall 2025" and "Spring 2026" and no forms of its own. An officer
+sets one folder ID per year and both terms are found, whatever nesting a future officer invents.
+Depth is capped at 4 so a mis-pasted Drive root cannot walk the whole account, and visited folders
+are tracked so a shortcut back to an ancestor cannot loop. Folder IDs are deduplicated, so two
+years pointing at the same folder walk it once.
+
+Note that the folder never decides *which* year a response counts for. That comes from the event's
+date, resolved against `academic_years`. Folders only decide what gets discovered.
+
 ## Phases
 
 Status verified against the live project and the repository on 2026-08-02.

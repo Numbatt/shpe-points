@@ -45,6 +45,13 @@
 /** Apps Script kills a run at ~6 minutes; stop well short and let the next pass continue. */
 var TIME_BUDGET_MS = 4 * 60 * 1000;
 
+/**
+ * How deep to walk below a configured folder. A year folder holding term subfolders is depth 1,
+ * so 4 leaves plenty of room for whatever nesting a future officer invents while still bounding
+ * the damage if someone pastes a Drive root ID into the Years screen.
+ */
+var MAX_FOLDER_DEPTH = 4;
+
 function config_() {
   var props = PropertiesService.getScriptProperties();
   var cfg = {
@@ -85,12 +92,32 @@ function pollForms() {
   var skippedFolders = 0;
   var skippedFiles = 0;
 
+  // Breadth-first over subfolders, because the chapter files sign-in forms by term: a year's
+  // folder holds "Fall 2025" and "Spring 2026" and no forms of its own. An officer sets ONE
+  // folder ID per year and both terms are found, however they choose to nest things later.
+  //
+  // Two guards. MAX_FOLDER_DEPTH stops a mis-set ID (someone pastes the whole Drive root) from
+  // walking the world. `seen` stops a loop: Drive lets a folder appear under several parents,
+  // and a shortcut back to an ancestor would otherwise recurse forever.
+  //
+  // The queue is seeded deduped, so two years pointing at the same folder walk it once.
+  var queue = [];
+  var seen = {};
+  for (var s = 0; s < state.folders.length; s++) {
+    var seedId = state.folders[s].folderId;
+    if (seen[seedId]) continue;
+    seen[seedId] = true;
+    queue.push({ id: seedId, yearId: state.folders[s].yearId, depth: 0 });
+  }
+
   // One shared TIME_BUDGET_MS across every folder, not one budget per folder — a chapter with
   // several years' folders (last year re-walked for late submissions, this year live) must not
   // let an early folder consume the whole pass and starve the rest. Whatever isn't reached keeps
   // its existing high-water mark and is picked up on the next pass; nothing is lost by stopping.
-  for (var f = 0; f < state.folders.length; f++) {
-    var folderInfo = state.folders[f];
+  var foldersWalked = 0;
+
+  while (queue.length > 0) {
+    var folderInfo = queue.shift();
 
     if (Date.now() - startedAt > TIME_BUDGET_MS) {
       skippedFolders++;
@@ -99,17 +126,32 @@ function pollForms() {
 
     var folder;
     try {
-      folder = DriveApp.getFolderById(folderInfo.folderId);
+      folder = DriveApp.getFolderById(folderInfo.id);
     } catch (err) {
       // A bad or deleted folder ID for one year (e.g. it was moved to the trash) must not take
       // down polling for every other year. Logged, not thrown, so the loop continues.
       Logger.log(
         'Could not open forms folder %s for year %s: %s',
-        folderInfo.folderId,
+        folderInfo.id,
         folderInfo.yearId,
         err
       );
       continue;
+    }
+
+    foldersWalked++;
+
+    // Enqueue children before reading files, so a shallow folder holding nothing but subfolders
+    // still contributes its terms even if the budget runs out partway through this pass.
+    if (folderInfo.depth < MAX_FOLDER_DEPTH) {
+      var subs = folder.getFolders();
+      while (subs.hasNext()) {
+        var sub = subs.next();
+        var subId = sub.getId();
+        if (seen[subId]) continue;
+        seen[subId] = true;
+        queue.push({ id: subId, yearId: folderInfo.yearId, depth: folderInfo.depth + 1 });
+      }
     }
 
     var files = folder.getFilesByType(MimeType.GOOGLE_FORMS);
@@ -177,14 +219,20 @@ function pollForms() {
   }
 
   if (batch.length === 0) {
-    Logger.log('No forms found across %s watched folder(s).', state.folders.length);
+    Logger.log(
+      'No forms found. Walked %s folder(s) below %s configured root(s).',
+      foldersWalked,
+      state.folders.length
+    );
     return;
   }
 
   var result = push_(cfg, batch);
   Logger.log(
-    'Polled %s form(s) across %s folder(s); skipped %s folder(s) and %s file(s) for time budget. Response: %s',
+    'Polled %s form(s) across %s folder(s) below %s configured root(s); skipped %s folder(s) and ' +
+      '%s file(s) for time budget. Response: %s',
     batch.length,
+    foldersWalked,
     state.folders.length,
     skippedFolders,
     skippedFiles,
