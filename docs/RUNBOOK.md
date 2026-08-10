@@ -51,6 +51,16 @@ who then collects points. Type the correct netID and press Attach.
 
 **Forms the poller cannot read.** See "The one rule" above.
 
+**Not an event.** Every Google Form in the sign-in folder becomes a row here, and occasionally one
+of them isn't a sign-in at all — someone drops an officer application or a t-shirt survey in the
+wrong place. Press **Not an event**. The row disappears for good and any responses it collected are
+cleared. Nothing is lost that mattered: an event nobody has typed is worth zero points, so a
+dismissed form never paid anybody anything.
+
+Press it only for forms that genuinely aren't events. If you dismiss a real sign-in form by
+mistake, it stops recording attendance from that moment on — tell whoever maintains the database
+and they can undo it, but responses submitted while it was dismissed won't come back.
+
 ---
 
 ## Volunteering
@@ -74,6 +84,28 @@ hours later rewrites their points automatically.
 
 ## Once a year
 
+**Start the year — one folder, one paste.** This is the entire annual setup for automatic points.
+
+1. In Drive, as the shared Gmail, make this year's folder and put a **`Sign-In Forms`** folder
+   inside it. Copying last year's folder structure is the easiest way to get this right, and it is
+   why the convention survives officer generations without anybody being told about it.
+2. In the dashboard, open the year pill → **Start a new academic year**. Fill in the ID (`2026-27`),
+   the start and end dates, and paste the **`Sign-In Forms` folder ID** — not the year folder's ID.
+
+That's it. Within 15 minutes the system is watching the new year, and last year keeps being watched
+for late submissions until you clear its folder ID. Nobody edits any code, ever.
+
+> **Put sign-in forms in that folder and nothing else.** The system reads every Google Form it
+> finds there, including forms in sub-folders, so filing by term (`Fall 2026`, `Spring 2027`) inside
+> it works fine. Anything else you drop in — an application, a survey, an RSVP — shows up in Needs
+> attention until somebody presses **Not an event**. That is annoying rather than dangerous, and it
+> is deliberately the safer direction to fail in: a system that ignored forms outside one exact
+> folder would silently lose a real sign-in the first time somebody filed it one level up, and
+> nobody would find out until a member asked why they had no points.
+>
+> The folder ID is stored on the academic year in the database, which is why changing it is a
+> dashboard edit and never an Apps Script edit.
+
 **After elections — the Roles tab.** Add each eboard member and chair, then press **Apply role
 bonuses**. That button is safe to press as many times as you like: it recomputes rather than
 stacking, and removing someone withdraws their bonus.
@@ -82,7 +114,32 @@ Someone who studies abroad may hold a chair position one semester and an eboard 
 other. Add both. Each is earned separately and pays separately.
 
 **The membership form.** Make it like any other form; tap its type as **Membership**. Its answers
-become that year's membership records — class level, major, gender, grad year — automatically.
+become that year's membership records automatically.
+
+> **Copy last year's membership form. Do not write a new one from scratch.**
+>
+> This is the one place in the whole system where wording matters. The demographic questions are
+> read by an exact title match, deliberately: a wrong guess at somebody's major or gender would
+> quietly corrupt the numbers you deliberate over in October, so the system fills in only what it
+> is certain of and leaves the rest blank rather than inventing it.
+>
+> These six question titles must appear **exactly** as written, capital letters and all:
+>
+> | Question title | Becomes | Must be |
+> |---|---|---|
+> | `Class Level` | class level | short answer, e.g. Sophomore |
+> | `Major` | major | short answer |
+> | `Gender` | gender | short answer or multiple choice |
+> | `Expected Graduation Year` | grad year | exactly four digits, e.g. 2029 |
+> | `College` | residential college | short answer or multiple choice |
+> | `Birthday` | birthday | a **Date** question, not a text one |
+>
+> Anything worded differently ("What's your major?", or just "major" in lowercase) is ignored and
+> that column stays blank. The member still gets a membership record and still earns points; they
+> just cannot be placed in the October grid. The Roster tab shows you who that is.
+>
+> Also keep a netID or Rice email question on it, worded any way you like, exactly as on a normal
+> sign-in form.
 
 **The roster matters more than it looks.** A member with no membership record still earns points,
 but has no major or gender on file, so **they cannot be placed in the October deliberation grid**.
@@ -129,6 +186,31 @@ their side or in their cache.
 **"Nothing has ingested in days."** Sign in as the shared Gmail → script.google.com → open the
 poller project → **Executions**. Failures are visible there. Most common cause is an expired
 authorization after a Google account change; re-running `installTrigger` fixes it.
+
+**"Someone shows up as 'no name on file'."** Names fill themselves in. A sign-in only carries a
+netID, so a first-time attendee arrives nameless, and ingestion then looks the name up in Rice's
+public directory (`search.rice.edu`) and writes it in. You should rarely see a nameless person.
+
+When you do, it's one of three things, and none of them need fixing urgently:
+
+- **They suppressed their directory listing.** Rice lets students do this in ESTHER under FERPA,
+  and it's their call to make. They will never resolve automatically. Type the name in by hand on
+  the Standings row, which is exactly the old workflow and still works.
+- **They arrived through a path ingestion doesn't watch** — a sign-in you attached by hand, a netID
+  typed into the volunteer grid. Run the sweep below.
+- **Rice changed the directory.** Everyone new suddenly arrives nameless at once. Nothing breaks;
+  you're just back to typing names by hand until someone updates
+  `supabase/functions/_shared/directory.ts`. Points, attendance, and the leaderboard are unaffected.
+
+The sweep, for anyone technical, from a checkout of the repo:
+
+```
+SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... node scripts/backfill-names.ts
+```
+
+It prints what it would write and changes nothing. Add `--commit` to actually write. It is safe to
+re-run, and it never overwrites a name a person typed in the dashboard — if you corrected somebody's
+name by hand, that correction wins permanently.
 
 ---
 

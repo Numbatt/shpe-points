@@ -2,10 +2,12 @@
 
 > ## Current status — read this first
 >
-> *Last updated: 2026-07-30.*
+> *Last updated: 2026-08-02.*
 >
-> **Where things stand:** Phases 0 and 1 are **applied and verified on the live database**.
-> Phases 3–7 are written and committed but have never run against a real Google Form.
+> **Where things stand:** Phases 0, 1, 2, 3b and 3c are done. The `ingest-checkin` Edge Function is
+> **deployed and live**. Nothing has yet run against a real Google Form: the pipeline needs its
+> shared secret set and the Apps Script poller installed under the shared Gmail. See the phase
+> table at the bottom for the exact remaining steps.
 >
 > ### Done and verified
 >
@@ -27,21 +29,24 @@
 >
 > ### Next actions
 >
-> 1. **Finish Google sign-in.** Cloud project `SHPE Rice` exists; still to do — create the OAuth
->    client, publish the consent screen, paste the credentials into Supabase, and **disable the
->    Email provider** so Google is genuinely the only way in.
-> 2. **Run the backfill** once the source sheets are located.
-> 3. **Deploy** the Edge Function (with its shared secret) and the Apps Script poller, then run
->    the one-tap end-to-end test with a real form.
+> 1. **Set `INGEST_SHARED_SECRET`** on the Edge Function (Supabase → Edge Functions → Secrets).
+>    Until it is set, every request to the function returns 401 — it fails closed, which is why
+>    deploying it ahead of the secret is safe.
+> 2. **Install the poller.** Paste `apps-script/poller.js` into a script project owned by the
+>    shared Gmail, set `INGEST_URL` and `INGEST_SECRET`, run `installTrigger` once.
+> 3. **Run the one-tap end-to-end test** (verification #2 below) with a real form.
+> 4. **Run the backfill** once the source sheets are located.
 >
 > ### Still needed from Diego
 >
 > - **The backfill sheets.** The gap is **wider than originally thought**: the newest event in the
 >   database is 2025-09-02, so Fall 2025 from September onward *and* all of Spring 2026 are
 >   missing. Each event also needs a date and a type.
-> - **The Drive folder ID** holding attendance forms — blocks all Phase 3 testing.
 > - The points reset policy — current officers will decide. Until then: accumulate all-time,
 >   filter by date at view time. Already what the schema does; no code waits on it.
+>
+> Google sign-in is finished (`google: true`, `email: false`). The 2025-26 Drive folder ID is
+> recorded on that academic year.
 >
 > **Context on the author:** Diego built the current system but is no longer an officer. This is
 > explicitly a handoff artifact for the next VP, who is not necessarily technical. When trading off
@@ -239,6 +244,33 @@ Officers write their own forms, so the script can't assume a fixed question. Res
 4. Unresolvable → `unmatched_signins`, fixable in one dashboard click. Never silently dropped, never a phantom person.
 
 A **template form** lives in the Drive folder for officers to copy, which guarantees a well-formed netID question. Ingestion stays tolerant of hand-made forms so nothing breaks when someone forgets.
+
+### Getting a name from a netID
+
+A sign-in carries a netID and usually nothing else, so a first-time attendee lands in `people` with a netID and no name. Every one of those used to be manual work: an officer looked the person up and typed first and last into the dashboard.
+
+Rice already answers this question. `search.rice.edu` — the public people search — has a JSON backend that takes a netID and returns the person:
+
+```
+GET https://search.rice.edu/json/people/p/0/0/?q=dr56
+→ {"stats": {"count": "1"},
+   "results": [{"netid": "dr56", "name": "Diego Rico", "college": "Wiess College",
+                "major": "Computer Science", "year": "Senior", ...}]}
+```
+
+No authentication, no API key, no VPN, no campus network. `supabase/functions/_shared/directory.ts` wraps it, and `ingest-checkin` calls it for anyone in a batch who has no name. Read that module's header before touching it; the important parts:
+
+- **The endpoint is a fuzzy full-text search, not a key lookup.** `?q=lee` returns 302 people because it matches the surname. So the module never takes `results[0]`. It requires exactly one result whose own `netid` field equals the netID asked for, and returns nothing otherwise. This is the same posture as netID resolution itself: a person with no name is visible and one click from fixed, a person with *someone else's* name is invisible and wrong.
+- **It fills blanks, it never overwrites a human.** Both the Edge Function and the backfill script guard their write on `first_name` and `last_name` still being null. A name an officer typed wins over the registrar's, because someone may go by a name the registrar doesn't have and they told an officer which.
+- **It cannot fail a pass.** Every error path — outage, timeout, malformed body, ambiguity, write failure — is swallowed and leaves the person nameless. Attendance is the thing that has to land.
+- **Not everyone resolves.** Students can suppress their directory listing through ESTHER under FERPA, and those return zero results permanently. Manual name entry in the dashboard stays for exactly this reason. Deleting it would strand those members.
+- **The endpoint is undocumented and `robots.txt` disallows `/json/`.** That directive is aimed at crawlers, and a lookup fired the first time a netID appears is not crawling — but keep it that way. Answers are cached permanently by being written to `people`, so nobody is ever looked up twice, and bulk passes are sequential and capped. Do not build anything that walks the directory. If Rice changes or removes the endpoint, the system degrades to the manual entry it had before, which is why nothing depends on it succeeding.
+
+`node scripts/test-directory.ts` checks the verification rule and doubles as a canary on the endpoint — no framework, no credentials, no database. If its live checks start failing while the stubbed ones pass, Rice changed something, not us.
+
+The existing pile of nameless people is cleared with `node scripts/backfill-names.ts` (dry run by default, `--commit` to write). That script also covers the paths ingestion doesn't own — a sign-in attached by hand, a netID typed into the volunteer grid — so it is worth re-running occasionally rather than once.
+
+The same payload also carries `college`, `major`, and `year`, which are three of the six fields `membership-template.ts` collects. Those are deliberately **not** read. That module's whole design is exact-match-or-nothing because a wrong major corrupts the number behind an ~$800 sponsorship decision, and sourcing demographics from the registrar instead of the member's own form is a separate decision that should be made on purpose, not inherited from a name lookup.
 
 ### Volunteering — fully manual, entered in the dashboard
 
@@ -513,10 +545,10 @@ Status verified against the live project and the repository on 2026-08-02.
 |---|---|---|---|
 | 0 | Audit + export existing Supabase | **Done** | 9 CSVs in `scripts/legacy-export/`. |
 | 1 | Schema, views, RLS | **Done** | 8 migrations, applied and verified live. |
-| 2 | Per-year forms folder + **standard membership template** | **Not started** | Needs the Drive folder ID from an officer. Blocks 3a *and* the demographics half of 3b. The folder is recorded *in the dashboard*, not in Apps Script. The template must standardise the demographic question titles, not just the netID one. See below. |
-| 3a | Deploy Edge Function + poller | Written, not deployed | `ingest-checkin` returns 404. Discovery, polling, normalization, dedup, unmatched routing. |
-| 3b | **Membership form ingestion** | **Not written** | Missing work found 2026-08-02. Nothing populates `memberships`. See below. |
-| 3c | **Poller reads its folders from the database** | **Not written** | Removes the `FORMS_FOLDER_ID` script property per the rule above. |
+| 2 | Per-year forms folder + **standard membership template** | **Done** | 2025-26 points at its Drive folder (set from the dashboard). The template's six exact question titles are specified in `_shared/membership-template.ts` and written up for officers in `docs/RUNBOOK.md`; the Google Form itself is copied from last year's by an officer, not generated. |
+| 3a | Deploy Edge Function + poller | **Function deployed 2026-08-02.** Poller not yet installed | `ingest-checkin` is live (v1, `verify_jwt` off, authenticates on `x-ingest-secret`). Remaining: set `INGEST_SHARED_SECRET`, then paste `apps-script/poller.js` into a project owned by the shared Gmail. |
+| 3b | **Membership form ingestion** | **Done** | Edge Function upserts `memberships` on (netid, year_id); `resolve_unmatched_signin` is membership-aware, so Attach no longer pays attendance points for a membership form. Never run against a real form. |
+| 3c | **Poller reads its folders from the database** | **Done** | `FORMS_FOLDER_ID` is gone; the poller GETs its folder list and walks subfolders to depth 4. |
 | 4 | Backfill importer + run Spring 2026 | Written, dry-run only | Preview first. |
 | 5 | Officer dashboard | **Core done** | Remaining: the academic-year lifecycle screen, the year-grouped roster, and collapsible Needs attention. |
 | 6 | Public API doc → webmasters | Written | `docs/API.md`. Verify the live site still renders first. |
