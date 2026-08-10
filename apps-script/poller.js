@@ -193,17 +193,42 @@ function pollForms() {
       var responses = since ? form.getResponses(since) : form.getResponses();
 
       var payloadResponses = responses.map(function (r) {
+        var answers = r.getItemResponses().map(function (ir) {
+          var answer = ir.getResponse();
+          return {
+            question: ir.getItem().getTitle(),
+            // Checkbox questions answer with an array; flatten so the netID resolver sees strings.
+            answer: Array.isArray(answer) ? answer.join(', ') : String(answer),
+          };
+        });
+
+        // Google's built-in "Collect email addresses" setting is NOT a form item, so it never
+        // appears in getItemResponses() above. This is not a hypothetical gap: on 2026-08-09 the
+        // first live pass ingested four GBM forms that relied on it instead of adding their own
+        // netID question, and every one of them reached the resolver with no identity in the
+        // payload at all. The answer-shape fallback in _shared/netid.ts then attributed each
+        // response to the first question that looked like a netID -- on a form opening with
+        // "First Name", that is a first name recorded as a person. 155 rows, 0 correct.
+        //
+        // Prepended rather than appended so it is also the first thing the shape fallback would
+        // reach, and titled "Email" so it matches the resolver's existing question-title regex
+        // with no change needed on that side.
+        var respondentEmail = '';
+        try {
+          respondentEmail = r.getRespondentEmail();
+        } catch (err) {
+          // A form not collecting email returns '' rather than throwing, but this is wrapped
+          // anyway: an identity the poller cannot read must degrade to the added questions
+          // speaking for themselves, never to a thrown pass that records no attendance at all.
+        }
+        if (respondentEmail) {
+          answers.unshift({ question: 'Email', answer: respondentEmail });
+        }
+
         return {
           responseId: r.getId(),
           submittedAt: r.getTimestamp().toISOString(),
-          answers: r.getItemResponses().map(function (ir) {
-            var answer = ir.getResponse();
-            return {
-              question: ir.getItem().getTitle(),
-              // Checkbox questions answer with an array; flatten so the netID resolver sees strings.
-              answer: Array.isArray(answer) ? answer.join(', ') : String(answer),
-            };
-          }),
+          answers: answers,
         };
       });
 

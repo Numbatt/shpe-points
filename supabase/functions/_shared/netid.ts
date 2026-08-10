@@ -24,7 +24,18 @@ export function normalizeNetid(raw: string | null | undefined): string | null {
 
   let value = String(raw).trim().toLowerCase().replace(/^mailto:/, '');
   // Forms sometimes carry a zero-width or non-breaking space from a paste.
-  value = value.replace(/[​-‍﻿ ]/g, '').trim();
+  //
+  // Written as \u escapes, NOT as the literal characters. Do not "simplify" this back to literal
+  // glyphs. They are invisible, so any tool that copies this file -- a deploy that re-types its
+  // contents, an editor normalizing whitespace, a paste through a chat window -- can silently swap
+  // U+00A0 for a plain space with nothing on screen to show it happened. That exact corruption
+  // occurred during a 2026-08-09 redeploy and is not theoretical.
+  //
+  // The failure it causes is worse than losing the cleanup: a class containing a literal space
+  // strips real spaces too, so "dr 56" would be rewritten to "dr56" and silently attributed to
+  // whoever actually owns that netID. Getting this wrong invents a match rather than missing one,
+  // which is the one outcome the resolver is built to never do.
+  value = value.replace(/[\u200b-\u200d\ufeff\u00a0]/g, '').trim();
   if (value === '') return null;
 
   const at = value.indexOf('@');
@@ -54,8 +65,9 @@ export interface IdentityResolution {
  * Find the netID in an arbitrary form response.
  *
  * Officers write their own forms, so there is no fixed question to rely on. Resolution order per
- * docs/DESIGN.md: match the question title first, then fall back to any answer that simply looks
- * like a netID or Rice address.
+ * docs/DESIGN.md: match the question title first, then fall back to any answer that carries a
+ * Rice ADDRESS. The fallback deliberately does not accept a bare netID-shaped word — see the
+ * comment on step 2 below, which is the load-bearing one in this file.
  */
 export function resolveIdentity(answers: FormAnswer[]): IdentityResolution {
   // 1. A question that says it wants a netID or email.
@@ -66,9 +78,32 @@ export function resolveIdentity(answers: FormAnswer[]): IdentityResolution {
     }
   }
 
-  // 2. Otherwise, any answer shaped like one. Deliberately second: a form asking "who referred
-  //    you?" could hold a netID too, and the labelled question is the more trustworthy source.
+  // 2. Otherwise, a Rice ADDRESS in any answer, whatever that question happened to be called.
+  //    Deliberately second: a form asking "who referred you?" could hold one too, and the
+  //    labelled question is the more trustworthy source.
+  //
+  //    Note what this branch does NOT accept, because that restriction is the entire point of it
+  //    and must not be relaxed: a bare netID-shaped word. NETID_RE matches any 2-12 character run
+  //    of letters and digits containing at least one letter, which is also the shape of most first
+  //    names — "aaron", "paulina", "jr", and the gender answer "male" all satisfy it.
+  //
+  //    This is not hypothetical. Before the `@` guard existed, four sign-in forms carried identity
+  //    only in Google's auto-collected email, which is not a form item and so never reached this
+  //    function at all (see the getRespondentEmail() comment in apps-script/poller.js). Every
+  //    response on those forms fell through to here, and this loop attributed each one to whatever
+  //    the first question happened to be — on forms opening with "First Name", that produced 97
+  //    phantom people out of 180 identities on 2026-08-09. It also silently destroyed real data:
+  //    two distinct attendees both named Aaron collapsed into a single `aaron` row under
+  //    unique (event_id, netid), and the second person's attendance was discarded as a duplicate.
+  //
+  //    Requiring the '@' makes that class of failure structurally impossible rather than merely
+  //    unlikely. normalizeNetid already rejects every domain except rice.edu, so this branch can
+  //    now only return an identity the respondent actually typed as a Rice address. A response
+  //    carrying no address falls through to (3) and becomes an unmatched_signins row: visible,
+  //    attributable to a specific event, and one click from fixed. That is the failure mode this
+  //    module is supposed to have — missing a match, never inventing one.
   for (const { answer } of answers) {
+    if (!String(answer ?? '').includes('@')) continue;
     const netid = normalizeNetid(answer);
     if (netid) return { netid, via: 'answer-shape', raw: answer ?? null };
   }
