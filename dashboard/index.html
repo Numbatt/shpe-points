@@ -124,6 +124,17 @@
     border-radius: 3px; padding: 5px 11px; font: inherit; font-size: 14px; cursor: pointer;
   }
   button.ghost:hover { border-color: var(--ink); }
+  /* Membership pays zero points and routes to member demographics instead of attendance — an
+     officer reaching for GBM should never land on it by accident. Dashed and muted sets it apart
+     from the point-paying types beside it; data-membership (rather than reordering the DOM) is
+     what typeButtons() also uses to sort it last. */
+  button.ghost[data-membership] { border-style: dashed; color: var(--faint); margin-left: 4px; }
+  button.ghost[data-membership]:hover { border-color: var(--faint); color: var(--muted); }
+  /* "Not an event" dismisses a discovered form rather than typing it, so it must never read as
+     one more type button beside it: --danger and a border sets it apart the same way
+     data-membership sets GBM apart from point-paying types. */
+  button.ghost[data-dismiss] { color: var(--danger); border-color: var(--line-strong); }
+  button.ghost[data-dismiss]:hover { border-color: var(--danger); }
   button.act:hover { filter: brightness(1.15); }
   button.ghost:disabled, button.act:disabled { opacity: .4; cursor: not-allowed; }
   input, select, textarea {
@@ -440,9 +451,9 @@ function wireCollapsibles(root) {
 // ---------------------------------------------------------------------------
 async function renderAttention(root) {
   const [untyped, unmatched, unreadable, totals] = await Promise.all([
-    get('events?type_code=is.null&select=id,name,occurred_on,source&order=occurred_on.desc'),
+    get('events?type_code=is.null&ignored_at=is.null&select=id,name,occurred_on,source&order=occurred_on.desc'),
     get('unmatched_signins?resolved_at=is.null&select=id,raw_identifier,event_id,events(name,occurred_on)&order=id.desc'),
-    get('forms?unreadable_since=not.is.null&select=form_id,last_error,unreadable_since'),
+    get('forms?unreadable_since=not.is.null&select=form_id,title,last_error,unreadable_since'),
     get('v_member_totals?select=netid,first_name,last_name,total_points&order=total_points.desc'),
   ]);
 
@@ -454,20 +465,21 @@ async function renderAttention(root) {
     get(`attendance?event_id=eq.${e.id}&select=id`).then((r) => r.length)));
 
   const typeButtons = (id) => state.eventTypes
-    .map((t) => `<button class="ghost" data-type="${esc(t.code)}" data-event="${esc(id)}">${esc(t.label)}</button>`)
+    .map((t) => `<button class="ghost" data-type="${esc(t.code)}" data-event="${esc(id)}"${t.is_membership_form ? ' data-membership' : ''}>${esc(t.label)}</button>`)
     .join(' ');
 
   root.innerHTML = `
     ${detailsCard('att-untyped', untyped.length, `Events awaiting a type ${countTag(untyped.length)}`,
       untyped.length === 0 ? '<div class="empty">Nothing waiting.</div>' : `
       <div class="scroll"><table>
-        <thead><tr><th>Date</th><th>Event</th><th>Recorded</th><th>Set type</th></tr></thead>
+        <thead><tr><th>Date</th><th>Event</th><th>Recorded</th><th>Set type</th><th></th></tr></thead>
         <tbody>${untyped.map((e, i) => `
           <tr>
             <td>${esc(e.occurred_on)}</td>
             <td>${esc(e.name)} ${e.source === 'manual' ? '<span class="pill">manual</span>' : ''}</td>
             <td class="num">${counts[i]}</td>
             <td class="row">${typeButtons(e.id)}</td>
+            <td><button class="ghost" data-dismiss="${esc(e.id)}">Not an event</button></td>
           </tr>`).join('')}
         </tbody>
       </table></div>`)}
@@ -492,7 +504,7 @@ async function renderAttention(root) {
         <thead><tr><th>Form</th><th>Since</th><th>Error</th></tr></thead>
         <tbody>${unreadable.map((f) => `
           <tr>
-            <td><a href="https://docs.google.com/forms/d/${esc(f.form_id)}/edit" target="_blank" rel="noopener">${esc(f.form_id.slice(0, 14))}</a></td>
+            <td><a href="https://docs.google.com/forms/d/${esc(f.form_id)}/edit" target="_blank" rel="noopener">${esc(f.title || f.form_id.slice(0, 14))}</a></td>
             <td>${esc((f.unreadable_since || '').slice(0, 10))}</td>
             <td style="white-space:normal">${esc(f.last_error || '')}</td>
           </tr>`).join('')}
@@ -519,6 +531,21 @@ async function renderAttention(root) {
   root.querySelectorAll('[data-type]').forEach((b) => b.onclick = () => guard(async () => {
     await patch(`events?id=eq.${b.dataset.event}`, { type_code: b.dataset.type, points: null });
     toast('Type set. Points awarded to everyone recorded.');
+    show('attention');
+  }));
+
+  // Dismissing a discovered form that was never an event sign-in (an officer application, a
+  // t-shirt survey). The event row is kept as a tombstone rather than deleted: forms.event_id
+  // is ON DELETE CASCADE, so deleting the event would delete the forms row too, and the poller
+  // would rediscover the form as brand new next run — an infinite loop. Its attendance and
+  // unmatched sign-ins are cleared since a non-event's are worth 0 points either way.
+  root.querySelectorAll('[data-dismiss]').forEach((b) => b.onclick = () => guard(async () => {
+    if (!confirm('Mark this as not an event? Its recorded attendance and unmatched sign-ins will be cleared.')) return;
+    const id = b.dataset.dismiss;
+    await patch(`events?id=eq.${id}`, { ignored_at: new Date().toISOString(), ignored_by: session.email });
+    await del(`attendance?event_id=eq.${id}`);
+    await del(`unmatched_signins?event_id=eq.${id}`);
+    toast('Dismissed.');
     show('attention');
   }));
 
@@ -1240,10 +1267,13 @@ async function boot() {
 
   try {
     const [types, config] = await Promise.all([
-      get('event_types?select=code,label&is_membership_form=is.false&order=label'),
+      get('event_types?select=code,label,is_membership_form&order=label'),
       get('app_config?select=key,value'),
     ]);
-    state.eventTypes = types;
+    // Membership pays no points and routes into member demographics rather than attendance — a
+    // categorically different action from the other five. Sort it last (stable sort keeps the
+    // rest in the label order the API returned) so typeButtons() never lets it blend in.
+    state.eventTypes = types.slice().sort((a, b) => Number(a.is_membership_form) - Number(b.is_membership_form));
     state.currentYear = config.find((c) => c.key === 'current_year_id')?.value;
     el('year-pill').textContent = state.currentYear || '';
   } catch (e) {
