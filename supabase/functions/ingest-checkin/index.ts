@@ -24,11 +24,18 @@
  *     (class_level, major, gender, expected_grad_year, college, birthday) are populated only by
  *     exact question-title match against the template in ../_shared/membership-template.ts — see
  *     that file's header before editing it.
+ *   - NAMES ARE FILLED IN, NEVER REQUIRED. A sign-in carries a netID and usually nothing else, so
+ *     a first-time attendee lands as a `people` row with no name. After the upsert, anyone in the
+ *     batch still missing a name gets one looked up from Rice's public directory via
+ *     ../_shared/directory.ts. That lookup is best-effort in the strict sense: it cannot fail a
+ *     pass, it never overwrites a name a human typed, and when it finds nothing the person stays
+ *     exactly as they were — nameless, visible, and editable in the dashboard.
  */
 
-import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { createClient, type SupabaseClient } from 'jsr:@supabase/supabase-js@2';
 import { resolveIdentity, type FormAnswer } from '../_shared/netid.ts';
 import { extractMembershipDemographics, MEMBERSHIP_DEMOGRAPHIC_COLUMNS } from '../_shared/membership-template.ts';
+import { lookupNetids } from '../_shared/directory.ts';
 
 interface IncomingResponse {
   /** Google's response ID — stable per submission, used to make replays cheap to spot. */
@@ -70,6 +77,60 @@ function secretMatches(provided: string | null): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
   return diff === 0;
+}
+
+/**
+ * Fill in first/last name from Rice's public directory for anyone in this batch who has none.
+ *
+ * Best-effort by construction. Every failure path — the directory being down, a suppressed
+ * listing, an ambiguous result, a write error — leaves the person exactly as they are today: a
+ * netID with no name, shown as "no name on file" in the dashboard and one text field from fixed.
+ * Nothing here is allowed to fail an ingestion pass; attendance is the thing that must land.
+ *
+ * Reads before it looks anything up, for two reasons. It keeps the outbound request count equal to
+ * the number of people who genuinely need a name (a normal pass needs zero, and makes zero
+ * requests), and it means a name only ever gets fetched once per person in practice — the answer
+ * is cached by virtue of being written to `people`.
+ */
+async function fillMissingNames(db: SupabaseClient, netids: string[]): Promise<void> {
+  try {
+    if (netids.length === 0) return;
+
+    const { data: nameless, error } = await db
+      .from('people')
+      .select('netid')
+      .in('netid', netids)
+      .is('first_name', null)
+      .is('last_name', null);
+
+    if (error || !nameless || nameless.length === 0) return;
+
+    const found = await lookupNetids(
+      (nameless as { netid: string }[]).map((p) => p.netid),
+      // A pass with more than 25 brand-new nameless people is a backfill, not a sign-in sheet.
+      // The rest stay nameless and get picked up on a later pass, which is the same outcome as a
+      // failed lookup and needs no extra handling.
+      { limit: 25 },
+    );
+
+    for (const person of found.values()) {
+      // Guarded on both columns still being null rather than a plain update. An officer can be
+      // typing a name into the dashboard at the same moment the 15-minute poller runs, and a
+      // hand-typed name is the more authoritative one: a person may go by something other than
+      // what the registrar has, and they told an officer which. Directory data fills a blank, it
+      // never overwrites a human.
+      await db
+        .from('people')
+        .update({ first_name: person.firstName, last_name: person.lastName })
+        .eq('netid', person.netid)
+        .is('first_name', null)
+        .is('last_name', null);
+    }
+  } catch {
+    // Deliberately swallowed. See the header comment: a directory outage must not be able to turn
+    // a pass that successfully recorded attendance into a failed one, because a failed pass leaves
+    // the high-water mark unadvanced and re-sends the whole batch next time.
+  }
 }
 
 Deno.serve(async (req) => {
@@ -119,26 +180,44 @@ Deno.serve(async (req) => {
   for (const form of payload.forms) {
     if (!form?.formId) continue;
 
+    // --- Discover: has this form been seen before? ---
+    // Read before branching on `unreadable`. The unreadable path below must UPDATE an existing row
+    // rather than upsert one: an upsert that omits event_id could clear the link between a form
+    // that has gone unreadable and the event it already created, and the next readable pass would
+    // then create a *second* event for the same form.
+    const { data: known } = await db
+      .from('forms')
+      .select('form_id, event_id, last_response_at, last_error')
+      .eq('form_id', form.formId)
+      .maybeSingle();
+
     // --- A form the script cannot read. Surface it; do not skip it. ---
     if (form.unreadable) {
-      await db.from('forms').upsert(
-        {
-          form_id: form.formId,
-          unreadable_since: new Date().toISOString(),
-          last_error: form.error ?? 'Form could not be opened. The shared account likely lacks edit access.',
-        },
-        { onConflict: 'form_id', ignoreDuplicates: false },
-      );
+      const flag = {
+        unreadable_since: new Date().toISOString(),
+        last_error: form.error ?? 'Form could not be opened. The shared account likely lacks edit access.',
+        // Recorded so Needs attention can name the form. Without it the officer sees a bare Drive
+        // file ID and has no way to tell which form is broken.
+        title: form.title || null,
+      };
+
+      // event_id stays null for a form that has never been readable — we can't know its date or
+      // its responses. forms.event_id is nullable for exactly this case; see the migration
+      // 20260802_forms_allow_unreadable_before_event.
+      const { error } = known
+        ? await db.from('forms').update(flag).eq('form_id', form.formId)
+        : await db.from('forms').insert({ form_id: form.formId, ...flag });
+
+      if (error) {
+        // Never swallow this. That row IS the loud failure docs/DESIGN.md verification #10
+        // requires; a silent write failure here is indistinguishable from the form being fine.
+        summary.push({ formId: form.formId, status: 'error', error: error.message });
+        continue;
+      }
+
       summary.push({ formId: form.formId, status: 'unreadable' });
       continue;
     }
-
-    // --- Discover: has this form been seen before? ---
-    const { data: known } = await db
-      .from('forms')
-      .select('form_id, event_id, last_response_at')
-      .eq('form_id', form.formId)
-      .maybeSingle();
 
     let eventId = known?.event_id as string | undefined;
 
@@ -169,23 +248,58 @@ Deno.serve(async (req) => {
       eventId = created.id;
 
       await db.from('forms').upsert(
-        { form_id: form.formId, event_id: eventId, unreadable_since: null, last_error: null },
+        {
+          form_id: form.formId,
+          event_id: eventId,
+          title: form.title || null,
+          unreadable_since: null,
+          last_error: null,
+        },
         { onConflict: 'form_id' },
       );
     } else if (known?.last_error) {
       // A previously unreadable form that now opens — clear the flag so it leaves the queue.
       await db
         .from('forms')
-        .update({ unreadable_since: null, last_error: null })
+        .update({ title: form.title || null, unreadable_since: null, last_error: null })
         .eq('form_id', form.formId);
     }
 
     // The event's current value. Null type means 0 points for now, restamped when tapped.
     const { data: event } = await db
       .from('events')
-      .select('points, type_code, occurred_on, event_types(is_membership_form)')
+      .select('points, type_code, occurred_on, ignored_at, event_types(is_membership_form)')
       .eq('id', eventId)
       .single();
+
+    // --- A form an officer has marked "not an event". ---
+    // The poller walks a whole Drive folder, so it also finds forms that were never sign-ins: an
+    // officer application, a t-shirt survey, a social RSVP. Dismissing one sets events.ignored_at
+    // (see the migration 20260809221613_events_ignored.sql). From then on its responses are read
+    // and thrown away rather than recorded.
+    //
+    // The high-water mark is still advanced. That is the whole point of doing this here rather
+    // than simply skipping the form: leaving the mark alone would make every 15-minute pass
+    // re-download this form's entire response history forever, and a survey with a few hundred
+    // responses would quietly eat the poller's 4-minute budget and starve the real sign-in forms
+    // behind it. Advancing the mark costs one near-empty getResponses() call per pass instead.
+    //
+    // Nothing is written and nothing is deleted here, so un-dismissing is just clearing the two
+    // columns; responses submitted while it was dismissed are the only ones not recoverable, which
+    // is the correct trade for a form that isn't an event.
+    if ((event as Record<string, any>)?.ignored_at) {
+      const latestIgnored = form.responses.map((r) => r.submittedAt).sort().at(-1);
+      if (latestIgnored) {
+        await db.from('forms').update({ last_response_at: latestIgnored }).eq('form_id', form.formId);
+      }
+      summary.push({
+        formId: form.formId,
+        eventId,
+        status: 'ignored',
+        received: form.responses?.length ?? 0,
+      });
+      continue;
+    }
 
     // A membership form's answers belong in `memberships`, not the attendance ledger. Routing a
     // membership form's sign-ins into attendance would pay points for filling out a form asking
@@ -295,6 +409,7 @@ Deno.serve(async (req) => {
     ].map((netid) => ({ netid }));
     if (newPeople.length > 0) {
       await db.from('people').upsert(newPeople, { onConflict: 'netid', ignoreDuplicates: true });
+      await fillMissingNames(db, newPeople.map((p) => p.netid));
     }
 
     // Dedup: one row per person per event, so a member submitting twice counts once.
