@@ -1,5 +1,25 @@
 # Handoff — 2026-08-26
 
+> ## Update, later the same day
+>
+> **The "Next phase" section below is now built, on branch `membership-dual-role`.** Dual-role
+> events, the reworked replay trigger, the audit trail, the ingest rewrite, the Events screen and
+> the docs are all committed and tested. `scripts/migration-tests/run.sh` applies all 14 migrations
+> to a throwaway Postgres and asserts 29 behaviours; the three node suites pass.
+>
+> One design point changed while building it. The membership flag is **not** a per-event toggle
+> shown on every row — a year has one membership form, usually the first GBM's sign-in, and asking
+> twenty-odd events a year is asking a question with one answer. It is a card in Needs attention
+> that disappears once set, and moves to the Events screen where it can be cleared. Typing an event
+> as a membership form claims the same slot implicitly, enforced by `events_membership_guard`.
+>
+> **Nothing has been applied to production.** Every warning below is still live, in particular the
+> one about `Fall GBM 1 - 08/28/25`. Once `20260826120000_dual_role_events.sql` lands, tapping
+> Membership stops being able to destroy that event's attendance — until then it can.
+>
+> Still blocked on: Supabase access to apply the migrations, the 2026-27 Drive folder ID, and this
+> year's eboard emails.
+
 Written at the end of a working session that ran out of budget mid-stream. Everything below is
 either **already done**, **written but not applied**, or **designed but not built**. Read the
 "Do this first" section before touching anything.
