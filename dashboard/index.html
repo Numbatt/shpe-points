@@ -170,6 +170,14 @@
     border-radius: 3px; font-size: 11px; color: var(--muted);
     text-transform: uppercase; letter-spacing: .06em;
   }
+  /* The one event a year that collects membership. Dashed, like the Membership type button it
+     comes from, so the two read as the same idea in both places it appears. */
+  .pill.mf { border-style: dashed; }
+  /* A dismissed event, still listed so it can be restored. Muted rather than hidden: the whole
+     reason this screen exists is that events which left the queue became invisible. Links inside
+     stay legible, or the row would be unreadable rather than merely quiet. */
+  tr.dim td { color: var(--faint); }
+  tr.dim a { color: inherit; }
 
   /* ---- year switcher ---------------------------------------------------- */
   /* The current year is the one piece of global state every screen keys off, so it doubles as
@@ -399,6 +407,36 @@ const countTag = (n, due = n > 0) => `<span class="count${due ? ' due' : ''}">${
 /** Empty cell. A dash reads as data; muted text reads as absence. */
 const blank = (label = 'not set') => `<span class="none">${label}</span>`;
 
+// An event's name, linked to its Google Form when we know which form produced it. Same URL shape
+// and same /edit target as the unreadable-forms card, so the two behave identically. Manual events
+// (volunteering, anything typed in by hand) have no form and stay plain text.
+const eventLink = (name, formId) => formId
+  ? `<a href="https://docs.google.com/forms/d/${esc(formId)}/edit" target="_blank" rel="noopener">${esc(name)}</a>`
+  : esc(name);
+
+/** Does this type code mean "membership form"? Read off state.eventTypes, loaded once in boot(). */
+const isMembershipType = (code) => state.eventTypes.some((t) => t.code === code && t.is_membership_form);
+
+/**
+ * The one type change that DESTROYS data, so it is the one that asks first.
+ *
+ * events_membership_retype_replays deletes the event's attendance and resets the form's high-water
+ * mark so the poller re-reads it from the beginning. That is recoverable for responses the poller
+ * can replay, and NOT recoverable for attendance entered by hand or carried over by a migration,
+ * which no form will ever re-send.
+ *
+ * It also now claims the academic year's membership slot (events_membership_guard), which is worth
+ * saying out loud: an officer reaching for it on the wrong event blocks the right one until they
+ * clear it on the Events screen. Every other type button is harmless and reversible.
+ */
+const confirmMembershipType = () => confirm(
+  'Typing this as a membership form does two things:\n\n'
+  + "\u2022 it becomes the membership form for its academic year \u2014 only one event a year can be, "
+  + 'so the right one will be blocked until this is cleared\n'
+  + '\u2022 it stops paying attendance points, and everything already recorded against it is '
+  + 'cleared and re-read from the form\n\n'
+  + 'Attendance added by hand will be lost. Continue?');
+
 let toastTimer;
 function toast(msg, isError) {
   const t = el('toast');
@@ -426,6 +464,7 @@ const state = { eventTypes: [], currentYear: null, tab: 'attention', volunteerEv
 
 const TABS = [
   ['attention', 'Needs attention'],
+  ['events', 'Events'],
   ['volunteering', 'Volunteering'],
   ['standings', 'Standings'],
   ['roster', 'Roster'],
@@ -471,7 +510,7 @@ function wireCollapsibles(root) {
 // Screen: Needs attention — the only screen anyone routinely opens.
 // ---------------------------------------------------------------------------
 async function renderAttention(root) {
-  const [untyped, unmatched, unreadable, totals] = await Promise.all([
+  const [untyped, unmatched, unreadable, totals, years, membershipEvents] = await Promise.all([
     // forms(form_id) is a reverse embed across forms.event_id. It comes back as an ARRAY, not an
     // object, because there is no unique constraint on that column — hence forms?.[0] below.
     // It is what lets the event name be a link straight to the Google Form, so an officer deciding
@@ -482,7 +521,31 @@ async function renderAttention(root) {
     get('unmatched_signins?resolved_at=is.null&select=id,raw_identifier,raw_payload,event_id,events(name,occurred_on,forms(form_id))&order=id.desc'),
     get('forms?unreadable_since=not.is.null&select=form_id,title,last_error,unreadable_since'),
     get('v_member_totals?select=netid,first_name,last_name,total_points&order=total_points.desc'),
+    get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc'),
+    // Every event that is a membership form, all years. Tiny by construction -- at most one row
+    // per academic year, enforced by events_membership_guard.
+    get('events?collects_membership=is.true&select=id,name,occurred_on'),
   ]);
+
+  // --- Does this year have a membership form yet? ---
+  // A year has ONE. Usually it is the first GBM's sign-in, because one form is what students
+  // actually fill out. Nothing on screen used to say when a year had none, which is how 2025-26
+  // went by with 331 people holding points and zero membership rows behind them.
+  //
+  // Shown as a queue item rather than a per-event toggle: asking twenty-odd sign-in forms a year
+  // whether each is the membership form is asking a question that has one answer. It disappears
+  // the moment one is picked, and moves to the Events screen, where it can be cleared.
+  const year = years.find((y) => y.id === state.currentYear);
+  const yearHasMembership = !!year && membershipEvents.some(
+    (e) => e.occurred_on >= year.starts_on && e.occurred_on <= year.ends_on);
+
+  // Only form-backed events can be it: a manual event has no responses to harvest demographics
+  // from. Fetched only when there is actually a decision to make.
+  const mfCandidates = year && !yearHasMembership
+    ? (await get(`events?occurred_on=gte.${year.starts_on}&occurred_on=lte.${year.ends_on}`
+        + '&ignored_at=is.null&select=id,name,occurred_on,forms(form_id)&order=occurred_on'))
+        .filter((e) => e.forms?.length)
+    : [];
 
   // Moved here from Roster: it is an actionable queue (an officer types in a name and saves),
   // and Roster is browse-only now.
@@ -490,13 +553,6 @@ async function renderAttention(root) {
 
   const counts = await Promise.all(untyped.map((e) =>
     get(`attendance?event_id=eq.${e.id}&select=id`).then((r) => r.length)));
-
-  // An event's name, linked to its Google Form when we know which form produced it. Same URL shape
-  // and same /edit target as the unreadable-forms card below, so the two behave identically.
-  // Manual events (volunteering, anything typed in by hand) have no form and stay plain text.
-  const eventLink = (name, formId) => formId
-    ? `<a href="https://docs.google.com/forms/d/${esc(formId)}/edit" target="_blank" rel="noopener">${esc(name)}</a>`
-    : esc(name);
 
   /**
    * Pull a display name out of a sign-in's raw payload.
@@ -537,6 +593,22 @@ async function renderAttention(root) {
     .join(' ');
 
   root.innerHTML = `
+    ${mfCandidates.length === 0 ? '' : detailsCard('att-membership', 1,
+      `Membership form for ${esc(year.id)} ${countTag(1)}`, `
+      <div class="hint" style="margin-bottom:12px">
+        Nothing is collecting membership information for ${esc(year.id)} yet, so the Roster will stay
+        empty and nobody counts as a member. Usually this is the first GBM&#39;s sign-in &mdash; one form
+        is what students actually fill out. Picking it re-reads that form from the beginning and
+        fills in majors, class levels and colleges. Everyone keeps the points they already have.
+      </div>
+      <div class="row">
+        <select id="mf-pick">
+          <option value="">Choose a form&hellip;</option>
+          ${mfCandidates.map((e) => `<option value="${esc(e.id)}">${esc(e.occurred_on)} &middot; ${esc(e.name)}</option>`).join('')}
+        </select>
+        <button class="act" id="mf-set">Set</button>
+      </div>`)}
+
     ${detailsCard('att-untyped', untyped.length, `Events awaiting a type ${countTag(untyped.length)}`,
       untyped.length === 0 ? '<div class="empty">Nothing waiting.</div>' : `
       <div class="scroll"><table>
@@ -620,16 +692,7 @@ async function renderAttention(root) {
   wireCollapsibles(root);
 
   root.querySelectorAll('[data-type]').forEach((b) => b.onclick = () => guard(async () => {
-    // Typing something as a membership form is the one type change that DESTROYS data: the
-    // events_membership_retype_replays trigger deletes the event's attendance and resets the
-    // form's high-water mark so the poller re-sends everything into `memberships` instead.
-    // That is recoverable for responses the poller can replay, and NOT recoverable for attendance
-    // entered by hand or carried over by a migration, which no form will ever re-send. Every other
-    // button here is harmless and reversible, so this one asks first.
-    if (b.hasAttribute('data-membership') &&
-        !confirm('Membership forms record demographics instead of paying attendance points.\n\n'
-               + "This clears everything recorded against this event and re-reads the form from the "
-               + 'beginning. Any attendance added by hand will be lost.\n\nContinue?')) return;
+    if (b.hasAttribute('data-membership') && !confirmMembershipType()) return;
     await patch(`events?id=eq.${b.dataset.event}`, { type_code: b.dataset.type, points: null });
     toast('Type set. Points awarded to everyone recorded.');
     show('attention');
@@ -698,6 +761,16 @@ async function renderAttention(root) {
     show('attention');
   }));
 
+  if (el('mf-set')) el('mf-set').onclick = () => guard(async () => {
+    const id = el('mf-pick').value;
+    if (!id) return toast('Choose a form first.', true);
+    // Only the flag. The event keeps its own type and keeps paying whatever that type pays --
+    // being the membership form is additive, which is the whole point of the column existing.
+    await patch(`events?id=eq.${id}`, { collects_membership: true });
+    toast('Set. The poller will re-read that form within 15 minutes and fill in demographics.');
+    show('attention');
+  });
+
   if (el('lookup-names')) el('lookup-names').onclick = () => guard(async () => {
     const button = el('lookup-names');
     button.disabled = true;
@@ -718,6 +791,126 @@ async function renderAttention(root) {
     await patch(`people?netid=eq.${encodeURIComponent(netid)}`, { first_name: first || null, last_name: last || null });
     toast(`Saved ${netid}.`);
     show('attention');
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Screen: Events — every event there has ever been, grouped by academic year.
+//
+// This screen exists because there was nowhere to see an event once it had been typed. It left
+// Needs attention and became invisible: no list, no history, no way back. That is not a cosmetic
+// gap. 2025-08-28 existed as TWO events for a year — a spreadsheet import and the poller's
+// form-backed copy — and nobody could have noticed, because after typing, neither was on screen
+// anywhere. It is also where a dismissed event gets a second chance, and where the year's
+// membership form can be handed to a different event.
+//
+// Browse-first: the only things that mutate here are the ones with nowhere else to live.
+// ---------------------------------------------------------------------------
+async function renderEvents(root) {
+  const [years, events, logged] = await Promise.all([
+    get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc'),
+    get('events?select=id,name,occurred_on,type_code,points,source,ignored_at,ignored_by,collects_membership,forms(form_id)&order=occurred_on.desc'),
+    // Every count on this screen in one query. An `in.(...)` list of event ids would work today and
+    // get longer every year until it hits a URL limit; the whole ledger is a few thousand narrow
+    // rows and is what Roster and Standings already pull. Tallied client-side below.
+    get('attendance?select=event_id,points_awarded'),
+  ]);
+
+  const tally = new Map();
+  for (const a of logged) {
+    const t = tally.get(String(a.event_id)) || { people: 0, points: 0 };
+    t.people += 1;
+    t.points += Number(a.points_awarded) || 0;
+    tally.set(String(a.event_id), t);
+  }
+
+  const typeLabel = (code) => state.eventTypes.find((t) => t.code === code)?.label;
+
+  // Events belong to a year only by date — there is no year_id on the table (see
+  // 20260731024857_new_schema.sql), which is the same reason v_points_ledger derives one. Anything
+  // outside every year still has to appear, or this screen would hide exactly the misdated event
+  // an officer came here to find.
+  const groups = years.map((y) => ({
+    id: y.id,
+    events: events.filter((e) => e.occurred_on >= y.starts_on && e.occurred_on <= y.ends_on),
+  }));
+  const orphans = events.filter((e) => !years.some((y) => e.occurred_on >= y.starts_on && e.occurred_on <= y.ends_on));
+  if (orphans.length) groups.push({ id: 'Outside any academic year', events: orphans, orphan: true });
+
+  const row = (e) => {
+    const t = tally.get(String(e.id)) || { people: 0, points: 0 };
+    const dismissed = !!e.ignored_at;
+    return `
+      <tr${dismissed ? ' class="dim"' : ''}>
+        <td>${esc(e.occurred_on)}</td>
+        <td>
+          ${eventLink(e.name, e.forms?.[0]?.form_id)}
+          ${e.source === 'manual' ? '<span class="pill">manual</span>' : ''}
+          ${e.collects_membership ? '<span class="pill mf">membership form</span>' : ''}
+          ${dismissed ? '<span class="pill">not an event</span>' : ''}
+        </td>
+        <td>
+          <select data-settype="${esc(e.id)}"${dismissed ? ' disabled' : ''}>
+            <option value=""${e.type_code ? '' : ' selected'}>&mdash; none &mdash;</option>
+            ${state.eventTypes.map((ty) => `<option value="${esc(ty.code)}"${ty.code === e.type_code ? ' selected' : ''}>${esc(ty.label)}</option>`).join('')}
+          </select>
+        </td>
+        <td class="num">${t.people}</td>
+        <td class="num">${Math.round(t.points * 100) / 100}</td>
+        <td class="row">
+          ${e.collects_membership ? `<button class="ghost" data-clearmf="${esc(e.id)}">Clear</button>` : ''}
+          ${dismissed ? `<button class="ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
+        </td>
+      </tr>`;
+  };
+
+  root.innerHTML = groups.map((g) => detailsCard(
+    `events-${g.id}`, g.events.length,
+    `${esc(g.id)} ${countTag(g.events.length, false)}`,
+    g.events.length === 0 ? '<div class="empty">No events.</div>' : `
+    <div class="scroll"><table>
+      <thead><tr><th>Date</th><th>Event</th><th>Type</th><th>People</th><th>Points</th><th></th></tr></thead>
+      <tbody>${g.events.map(row).join('')}</tbody>
+    </table></div>`,
+    g.id === state.currentYear)).join('');
+
+  wireCollapsibles(root);
+
+  root.querySelectorAll('[data-settype]').forEach((sel) => sel.onchange = () => guard(async () => {
+    const code = sel.value || null;
+    // show() re-renders from the database, so a cancelled confirm puts the select back where it was
+    // without any DOM bookkeeping here.
+    if (code && isMembershipType(code) && !confirmMembershipType()) return show('events');
+    // points: null lets events_default_points fill it from the type. Clearing the type zeroes
+    // everyone's points but keeps their rows, and re-typing pays them again -- the same
+    // "forgetting the type delays points, it never loses them" guarantee, run backwards.
+    await patch(`events?id=eq.${sel.dataset.settype}`, { type_code: code, points: null });
+    toast(code ? `Set to ${typeLabel(code)}.` : 'Type cleared. It is back in Needs attention.');
+    show('events');
+  }));
+
+  root.querySelectorAll('[data-clearmf]').forEach((b) => b.onclick = () => guard(async () => {
+    if (!confirm('Stop this form collecting membership information?\n\n'
+               + 'Everything already collected is kept. The year will show as having no membership '
+               + 'form until another one is picked, which is how you hand it to a different event.')) return;
+    await patch(`events?id=eq.${b.dataset.clearmf}`, { collects_membership: false });
+    toast('Cleared. Pick the new one in Needs attention.');
+    show('events');
+  }));
+
+  // Un-dismissing. Clearing ignored_at is only half of it: dismissing DELETED the event's
+  // attendance, so without resetting the form's high-water mark the event would come back empty
+  // and look restored while paying nobody. Nulling last_response_at makes the poller re-send the
+  // form's whole history on its next pass, which is the same mechanism the membership replay uses.
+  root.querySelectorAll('[data-restore]').forEach((b) => b.onclick = () => guard(async () => {
+    const id = b.dataset.restore;
+    if (!confirm('Restore this as a real event?\n\n'
+               + 'Its form will be read again from the beginning, so sign-ins recorded before it was '
+               + 'dismissed come back. Give the poller about 15 minutes.')) return;
+    await patch(`events?id=eq.${id}`, { ignored_at: null, ignored_by: null });
+    await patch(`forms?event_id=eq.${id}`, { last_response_at: null });
+    toast('Restored. Its sign-ins come back within 15 minutes.');
+    show('events');
   }));
 }
 
@@ -1454,7 +1647,7 @@ function wireYearDialog() {
 // Shell
 // ---------------------------------------------------------------------------
 const SCREENS = {
-  attention: renderAttention, volunteering: renderVolunteering, standings: renderStandings,
+  attention: renderAttention, events: renderEvents, volunteering: renderVolunteering, standings: renderStandings,
   roster: renderRoster, roles: renderRoles, adjustments: renderAdjustments,
 };
 
