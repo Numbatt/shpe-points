@@ -123,8 +123,23 @@ stacking, and removing someone withdraws their bonus.
 Someone who studies abroad may hold a chair position one semester and an eboard position the
 other. Add both. Each is earned separately and pays separately.
 
-**The membership form.** Make it like any other form; tap its type as **Membership**. Its answers
-become that year's membership records automatically.
+**The membership form.** Most years there isn't a separate one. Students fill out one form, so the
+first GBM's sign-in *is* the membership form — it asks for major, class year and college alongside
+the netID.
+
+Tell the system which form that is: **Needs attention** shows a card reading *"Nothing is
+collecting membership information for 2026-27 yet"* with a list of that year's forms. Pick the
+right one and press **Set**. Its answers become that year's membership records automatically, and
+everyone keeps the points they already earned for showing up. One form a year, one choice, and the
+card disappears once you've made it.
+
+If you genuinely do run a separate membership drive — a form that is not also a sign-in — make it
+like any other form and tap its type as **Membership**. That does the same thing, and additionally
+says the event pays no attendance points, which is right for a form somebody fills out from their
+dorm.
+
+Either way it is **one event per year**. If you pick the wrong one, open **Events**, find it, and
+press **Clear** — then pick again in Needs attention. Nothing already collected is lost.
 
 > **Copy last year's membership form. Do not write a new one from scratch.**
 >
@@ -188,6 +203,15 @@ that. The tool gives you the numbers; the conversation is yours.
 **"A member says their points are wrong."** Standings shows the breakdown per person: events, role
 bonuses, manual adjustments. If an event is missing, check whether it's still awaiting a type. If a
 person is missing from an event, look for their sign-in under unmatched.
+
+**"I want to see an event I already typed."** The **Events** tab lists every event there has ever
+been, newest first, grouped by academic year — with a link to its Google Form, how many people it
+recorded and how many points it paid. Once you type an event it leaves Needs attention, and this is
+where it goes. You can change a type here too, if you tapped the wrong one.
+
+**"I marked something as not an event by mistake."** Open **Events** and find it — dismissed events
+are still listed, greyed out. Press **Restore**. Its form gets read again from the beginning, so the
+sign-ins that were cleared come back on the next pass, about fifteen minutes.
 
 **"Someone needs points for something with no form."** Adjustments tab. A reason is required and
 your email is recorded against it — these decide real money, so every point that didn't come from a
@@ -299,12 +323,16 @@ Written honestly, so you know what you're inheriting:
 
 - **14 events have no type yet**, so every GBM since August 2025 currently shows 0 points. Tapping
   the type fixes each one instantly and pays everybody retroactively. **One warning before you go
-  down that list:** never tap **Membership** on an event unless it really is the membership form.
-  That button clears the event's attendance and re-reads the form from scratch, and the dashboard
-  will now ask you to confirm it for exactly that reason.
+  down that list:** never tap **Membership** on an event unless it really is a standalone
+  membership drive. That button clears the event's attendance, re-reads the form from scratch, and
+  claims the whole year's membership slot, so the right form is blocked until you clear it. The
+  dashboard asks you to confirm for exactly that reason. If the form is a sign-in that *also* asks
+  for major and class year, do not tap Membership — use the card in Needs attention instead, which
+  keeps everybody's points.
 - **No membership form has ever been read**, so nobody has a major, gender or class level on file
-  and the Standings filters are empty. The 2025-26 form was saved outside the watched folder, which
-  is the only reason. Move it in and it will be read on the next pass.
+  and the Standings filters are empty. For 2025-26 the form is `Fall GBM 1 - 08/28/25` — it was
+  both the sign-in and the membership form. Designating it in Needs attention fills in everyone's
+  demographics within about fifteen minutes and leaves all 75 attendance rows paying their point.
 - **91 people have no name.** Open **Needs attention → No name on file** and press
   **Look up 25 names in the Rice directory**. It fills blanks only and never changes a name
   somebody typed. Students who hid their directory listing stay blank and need typing in by hand.

@@ -28,6 +28,32 @@
 >   alone is not a gate: the anon key embedded in the dashboard is itself a valid project JWT.
 >   Verified live — anon key → 401, valid non-officer JWT → 403.
 >
+> ### What changed on 2026-08-26
+>
+> - **An event can now pay points *and* collect membership.** `Fall GBM 1 - 08/28/25` turned out to
+>   be both the GBM sign-in and the 2025-26 membership form — one form, because that is what
+>   students actually fill out. The schema could not express it: `type_code` is a single FK and the
+>   Edge Function's membership branch `continue`d before ever recording attendance, so either
+>   answer destroyed real data. `events.collects_membership` is now a separate overlay, and routing
+>   asks two independent questions instead of one either/or. See
+>   `migrations/20260826120000_dual_role_events.sql`.
+> - **The membership form is one slot per academic year**, not a per-event property. Typing an
+>   event as a membership form claims that slot implicitly — being the membership form is what the
+>   type means — and `events_membership_guard` keeps the two in sync and refuses a second claimant.
+>   `memberships` is keyed `(netid, year_id)`, so two collecting events in one year would silently
+>   overwrite each other rather than merge.
+> - **New Events screen.** Until now an event vanished from the dashboard the moment it was typed,
+>   which is precisely why the 2025-08-28 duplicate went unnoticed for a year. Every event is now
+>   listed by academic year, with its form link, type, attendee count and points paid. Dismissed
+>   events are listed rather than hidden and can be restored — which also resets the form's
+>   high-water mark, since dismissing deleted the attendance that restoring has to bring back.
+> - **Classification changes are audited.** `event_changes` records type, membership and dismissal
+>   changes, with the officer read from `auth.jwt()` inside the database rather than supplied by the
+>   browser, so it cannot be forged by anything holding the anon key.
+> - **Migrations are testable.** `scripts/migration-tests/run.sh` applies every migration to a
+>   throwaway Postgres 17 container and asserts 29 behaviours. It needs Docker and nothing else —
+>   no Supabase CLI, which cannot apply migrations against this project anyway.
+>
 > ### Still outstanding
 >
 > - **2026-27 has no `forms_folder_id`.** The poller is watching nothing for the current year.
@@ -278,7 +304,16 @@ Hours are never self-reported, per your decision. Editing a row later rewrites t
 
 ### Membership form
 
-Detected like any other form. The officer taps its type as **Membership**, which routes it to `memberships` instead of attendance — the annual form's answers (class level, grad year, gender, major, college, birthday) become that year's membership records automatically. Once a year, one tap.
+Detected like any other form. **One event per academic year collects membership** — usually the first GBM's sign-in, because students fill out one form, not two. The annual form's answers (class level, grad year, gender, major, college, birthday) become that year's membership records automatically.
+
+Two ways to designate it, and they mean the same thing:
+
+- **Needs attention** shows "nothing is collecting membership information for *year* yet" with a picker of that year's forms. The card disappears once one is set. This is the normal path.
+- **Typing an event as Membership** claims the slot implicitly. That type additionally means *pays no attendance*, which is what a standalone membership drive is.
+
+Collecting membership is **additive**: the event keeps its own type and keeps paying whatever that type pays. Membership pays 0 points, which is exactly why it can be an overlay — an event's worth is still answered by one thing, its type, so "what is this worth?" never becomes ambiguous. Two point-paying types would not be safe this way, which is why nothing else gets this treatment.
+
+Designating it re-reads the form from the beginning, so demographics submitted before anyone tapped anything are recovered rather than stranded behind the poller's high-water mark. Attendance already recorded survives — the ingest upsert ignores duplicates. Handing the slot to a different event is Clear on the Events screen, then pick again.
 
 ---
 
@@ -341,7 +376,7 @@ event_types
   code               text primary key       -- gbm|career|social|company|volunteer|membership
   default_points     numeric
   is_variable_points boolean default false  -- true only for volunteer
-  is_membership_form boolean default false  -- routes to memberships, not attendance
+  is_membership_form boolean default false  -- this TYPE pays no attendance; implies collecting
   drive_folder       text                   -- OPTIONAL auto-classify accelerator; null by default
 
 forms                       -- discovered Google Forms
@@ -432,6 +467,7 @@ Since discovery and ingestion are automatic, the dashboard is not a data-entry s
 | Screen | Purpose | Frequency |
 |---|---|---|
 | **Needs attention** | Newly detected events awaiting a type tap, unmatched sign-ins, forms the script can't open for lack of edit access. The only screen anyone routinely opens. | Per event, ~10 sec |
+| **Events** | Every event, grouped by academic year: form link, type, attendee count, points paid. Where a dismissed event is restored and where the year's membership form is handed to a different event. Browse-first. | Occasional |
 | **Volunteering** | Create a volunteer event, then a netID + hours table accepting typed rows or a paste from any spreadsheet. Preview resolves every netID before committing. | Per volunteer event |
 | **Standings** | Deliberation view: date-range filter, slice by major / gender / class year, toggles for exclude-eboard and exclude-role-bonuses. **Presents data; recommends nobody.** | October |
 | **Roster** | This year's memberships; who hasn't filled the form. | Occasional |
@@ -538,10 +574,10 @@ Status verified against the live project and the repository on 2026-08-02.
 | 1 | Schema, views, RLS | **Done** | 8 migrations, applied and verified live. |
 | 2 | Per-year forms folder + **standard membership template** | **Done** | 2025-26 points at its Drive folder (set from the dashboard). The template's six exact question titles are specified in `_shared/membership-template.ts` and written up for officers in `docs/RUNBOOK.md`; the Google Form itself is copied from last year's by an officer, not generated. |
 | 3a | Deploy Edge Function + poller | **Function deployed 2026-08-02.** Poller not yet installed | `ingest-checkin` is live (v1, `verify_jwt` off, authenticates on `x-ingest-secret`). Remaining: set `INGEST_SHARED_SECRET`, then paste `apps-script/poller.js` into a project owned by the shared Gmail. |
-| 3b | **Membership form ingestion** | **Done** | Edge Function upserts `memberships` on (netid, year_id); `resolve_unmatched_signin` is membership-aware, so Attach no longer pays attendance points for a membership form. Never run against a real form. |
+| 3b | **Membership form ingestion** | **Done** | Edge Function upserts `memberships` on (netid, year_id). Superseded in part by dual-role events (2026-08-26): an event can collect membership *and* pay points, and `resolve_unmatched_signin` now writes both rather than choosing. Never run against a real form. |
 | 3c | **Poller reads its folders from the database** | **Done** | `FORMS_FOLDER_ID` is gone; the poller GETs its folder list and walks subfolders to depth 4. |
 | 4 | Backfill importer + run Spring 2026 | Written, dry-run only | Preview first. |
-| 5 | Officer dashboard | **Core done** | Remaining: the academic-year lifecycle screen, the year-grouped roster, and collapsible Needs attention. |
+| 5 | Officer dashboard | **Core done** | Events screen added 2026-08-26. Remaining: an Officers section, so the allowlist stops being a SQL insert. |
 | 6 | Public API doc → webmasters | Written | `docs/API.md`. Verify the live site still renders first. |
 | 7 | Runbook + handoff doc | Written | Must be re-checked once 3b, 3c and 5 land, since they change the officer's routine. |
 
@@ -549,6 +585,19 @@ Phase 5 was built ahead of 3 and 4. That was harmless, but it means the dashboar
 data that the ingestion pipeline produced.
 
 ### Phase 3b: the membership gap
+
+> **Resolved. Kept as the record of how it was found and what it cost.** The analysis below is
+> written in the present tense of 2026-08-02. Two things have since changed and are worth reading
+> forward into it:
+>
+> - Item 2 was solved and then outgrown. `resolve_unmatched_signin` was made membership-aware in
+>   `20260802195206`, writing a membership row *instead of* attendance — the same either/or shape as
+>   the Edge Function, and wrong for the same reason once dual-role events arrived. It now does both
+>   independently (`20260826120000`).
+> - "Its own comment says those answers belong in `memberships`" turned out to be the smaller half
+>   of the problem. The routing was not merely unfinished; the *question* was wrong. Paying points
+>   and collecting membership are independent, and the form that proved it — `Fall GBM 1 -
+>   08/28/25` — had been sitting in the database the whole time.
 
 **Nothing in this repository writes to `memberships`.** Not a migration, not `backfill.ts`, not
 the dashboard, and not the Edge Function. Nothing anywhere parses `class_level`, `major`,
