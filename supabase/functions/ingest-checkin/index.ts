@@ -15,15 +15,21 @@
  *     (see the events_restamp_attendance trigger), so forgetting delays points, never loses them.
  *   - NEVER DROPS AN IDENTITY. Anything that doesn't resolve to a netID goes to unmatched_signins
  *     with its raw payload attached. No phantom people, no silent losses.
- *   - MEMBERSHIP FORMS LAND IN `memberships`, NEVER `attendance`. A form typed `Membership`
- *     (event_types.is_membership_form) upserts its resolved responses into `memberships` keyed on
- *     (netid, year_id) instead of paying attendance points for filling out a form — see
- *     docs/DESIGN.md, "Phase 3b: the membership gap". `year_id` is resolved from the *event's*
- *     occurred_on against academic_years, never from app_config.current_year_id, so a form filled
- *     out near a year boundary lands in the year it was actually filled out in. Demographics
- *     (class_level, major, gender, expected_grad_year, college, birthday) are populated only by
- *     exact question-title match against the template in ../_shared/membership-template.ts — see
- *     that file's header before editing it.
+ *   - PAYING POINTS AND COLLECTING MEMBERSHIP ARE SEPARATE QUESTIONS. A form typed `Membership`
+ *     (event_types.is_membership_form) pays no attendance — filling out a form asking your major
+ *     is not showing up, see docs/DESIGN.md, "Phase 3b: the membership gap". Independently, any
+ *     event with `events.collects_membership` upserts its resolved responses into `memberships`
+ *     keyed on (netid, year_id). An event can do both: Fall GBM 1 - 08/28/25 was the GBM sign-in
+ *     AND the 2025-26 membership form, because one form is what students actually fill out.
+ *     `year_id` is resolved from the *event's* occurred_on against academic_years, never from
+ *     app_config.current_year_id, so a form filled out near a year boundary lands in the year it
+ *     was actually filled out in. Demographics (class_level, major, gender, expected_grad_year,
+ *     college, birthday) are populated only by exact question-title match against the template in
+ *     ../_shared/membership-template.ts — see that file's header before editing it.
+ *   - A MEMBERSHIP ROW IS A DECLARATION; A SIGN-IN IS A SCRAP. The membership upsert REPLACES a
+ *     person's demographics wholesale (the latest submission wins, in full). An ordinary sign-in's
+ *     demographic answers go through gapfill_membership_demographics instead, which can only fill
+ *     nulls on a row that already exists — it can never create a member. Do not unify them.
  *   - NAMES ARE FILLED IN, NEVER REQUIRED. A sign-in carries a netID and usually nothing else, so
  *     a first-time attendee lands as a `people` row with no name. After the upsert, anyone in the
  *     batch still missing a name gets one looked up from Rice's public directory via
@@ -36,6 +42,7 @@ import { createClient, type SupabaseClient } from 'jsr:@supabase/supabase-js@2';
 import { resolveIdentity, type FormAnswer } from '../_shared/netid.ts';
 import { extractMembershipDemographics, MEMBERSHIP_DEMOGRAPHIC_COLUMNS } from '../_shared/membership-template.ts';
 import { lookupNetids } from '../_shared/directory.ts';
+import { routeEvent } from '../_shared/event-routing.ts';
 
 interface IncomingResponse {
   /** Google's response ID — stable per submission, used to make replays cheap to spot. */
@@ -268,7 +275,7 @@ Deno.serve(async (req) => {
     // The event's current value. Null type means 0 points for now, restamped when tapped.
     const { data: event } = await db
       .from('events')
-      .select('points, type_code, occurred_on, ignored_at, event_types(is_membership_form)')
+      .select('points, type_code, occurred_on, ignored_at, collects_membership, event_types(is_membership_form)')
       .eq('id', eventId)
       .single();
 
@@ -301,11 +308,24 @@ Deno.serve(async (req) => {
       continue;
     }
 
-    // A membership form's answers belong in `memberships`, not the attendance ledger. Routing a
-    // membership form's sign-ins into attendance would pay points for filling out a form asking
-    // for your major and t-shirt size — see the header comment above and docs/DESIGN.md, "Phase
-    // 3b: the membership gap".
-    const isMembershipForm = (event as Record<string, any>)?.event_types?.is_membership_form === true;
+    // --- Two independent questions, not one fork. ---
+    //
+    // These used to be the same decision: a membership form's answers belong in `memberships`, an
+    // ordinary sign-in's belong in `attendance`, pick one. That was wrong, and Fall GBM 1 -
+    // 08/28/25 is the proof — it was BOTH the GBM sign-in and the 2025-26 membership form, because
+    // one form is what students actually fill out. Either answer lost real data: routed to
+    // attendance, the year got no demographics at all; routed to memberships, 73 people lost the
+    // point they showed up for.
+    //
+    //   paysAttendance      — does showing up here earn the event's points?
+    //   collectsMembership  — does this form also declare who you are this year?
+    //
+    // A membership TYPE still pays nothing: filling out a form asking your major and t-shirt size
+    // is not attendance (docs/DESIGN.md, "Phase 3b: the membership gap"). What changed is that an
+    // event can now say yes to the second question without saying no to the first.
+    // Both answers come from ../_shared/event-routing.ts, which carries the full history of why
+    // this is two booleans and not one fork, and is unit-tested by scripts/test-event-routing.ts.
+    const { paysAttendance, collectsMembership } = routeEvent(event as Record<string, any>);
 
     // Resolved once per form, not per response: an event has exactly one occurred_on, so it maps
     // to exactly one academic year. Deliberately NOT app_config.current_year_id — a membership
@@ -360,21 +380,27 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      if (isMembershipForm) {
-        if (!membershipYearId) {
-          // No academic year covers this event's date — most likely a year nobody has created in
-          // the dashboard yet. There is nowhere to write a membership row without a year_id, and
-          // silently discarding the response would violate the NEVER DROPS AN IDENTITY guarantee
-          // in the header comment, so it surfaces as an unmatched sign-in instead: an officer
-          // creates the missing academic year and this becomes attachable by hand.
-          unmatchedRows.push({
-            event_id: eventId,
-            raw_identifier: netid,
-            raw_payload: { responseId: response.responseId, submittedAt: response.submittedAt, answers },
-          });
-          continue;
-        }
-
+      if (collectsMembership && !membershipYearId) {
+        // No academic year covers this event's date — most likely a year nobody has created in
+        // the dashboard yet. There is nowhere to write a membership row without a year_id, and
+        // silently discarding the response would violate the NEVER DROPS AN IDENTITY guarantee
+        // in the header comment, so it surfaces as an unmatched sign-in instead: an officer
+        // creates the missing academic year and this becomes attachable by hand.
+        //
+        // This no longer skips the attendance write below. Only the demographics are stranded; the
+        // point is not, and losing a point to a missing year row would be a new bug of exactly the
+        // kind this file exists to avoid. Recovering it later is safe because
+        // resolve_unmatched_signin inserts attendance `on conflict do nothing`, so attaching this
+        // by hand adds the membership row without ever double-paying.
+        //
+        // Reaching this at all takes deleting an academic_years row out from under a live event:
+        // events_membership_is_exclusive refuses to set the flag when no year covers the date.
+        unmatchedRows.push({
+          event_id: eventId,
+          raw_identifier: netid,
+          raw_payload: { responseId: response.responseId, submittedAt: response.submittedAt, answers },
+        });
+      } else if (collectsMembership) {
         const key = `${netid}|${membershipYearId}`;
         const demographics = extractMembershipDemographics(answers);
         // Every row gets the SAME set of top-level keys — every column in
@@ -393,8 +419,12 @@ Deno.serve(async (req) => {
         if (!existing || String(response.submittedAt) > String(existing.submitted_at)) {
           membershipByKey.set(key, row);
         }
-        continue;
       }
+
+      // ...and, independently, the attendance write. No `continue` above any more: that `continue`
+      // WAS the bug. It returned to the top of the loop before ever reaching this push, which is
+      // why a membership-typed event could never also record attendance no matter what else changed.
+      if (!paysAttendance) continue;
 
       attendanceRows.push({
         event_id: eventId,
@@ -414,7 +444,12 @@ Deno.serve(async (req) => {
       // explicit null here would be indistinguishable from "no answer" and coalesce would ignore
       // it anyway, but sending it invites a future reader to add an INSERT and reintroduce the
       // is_current_member problem.
-      if (membershipYearId) {
+      //
+      // Skipped entirely when the event collects membership: that path already wrote a COMPLETE
+      // membership row from this very response, so coalescing the same answers back over it is
+      // pure work. The two are not alternatives in general — an ordinary sign-in still gap-fills —
+      // they just have nothing to add to each other on the same response.
+      if (membershipYearId && !collectsMembership) {
         const demographics = extractMembershipDemographics(answers);
         if (Object.keys(demographics).length > 0) {
           const key = `${netid}|${membershipYearId}`;
