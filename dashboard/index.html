@@ -266,6 +266,9 @@
     <label>Drive folder holding this year's sign-in forms
       <input id="y-folder" placeholder="Folder ID, optional">
     </label>
+    <label>SHPE National Convention
+      <input id="y-convention" type="date">
+    </label>
     <label class="check" id="y-current-row" style="text-transform:none;letter-spacing:0;font-size:14px;color:var(--muted);display:flex;align-items:center;gap:6px">
       <input type="checkbox" id="y-current" checked> Make it the current year
     </label>
@@ -366,6 +369,24 @@ const patch = (p, body) => api(p, { method: 'PATCH', body: JSON.stringify(body) 
 const del = (p) => api(p, { method: 'DELETE' });
 const rpc = (fn, args) => post(`rpc/${fn}`, args);
 
+/**
+ * Call an Edge Function. Separate from api() because these live under /functions/v1/ rather than
+ * /rest/v1/ and answer with plain JSON rather than PostgREST's conventions.
+ *
+ * Used only for things the browser genuinely cannot do itself: search.rice.edu sends no CORS
+ * headers, so every directory lookup has to be relayed server-side. The officer's own token goes
+ * along and the function checks is_officer() with it.
+ */
+async function edgeFn(name, body) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: 'POST',
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Tiny DOM helpers — enough structure to stay readable without a framework.
 // ---------------------------------------------------------------------------
@@ -451,8 +472,14 @@ function wireCollapsibles(root) {
 // ---------------------------------------------------------------------------
 async function renderAttention(root) {
   const [untyped, unmatched, unreadable, totals] = await Promise.all([
-    get('events?type_code=is.null&ignored_at=is.null&select=id,name,occurred_on,source&order=occurred_on.desc'),
-    get('unmatched_signins?resolved_at=is.null&select=id,raw_identifier,event_id,events(name,occurred_on)&order=id.desc'),
+    // forms(form_id) is a reverse embed across forms.event_id. It comes back as an ARRAY, not an
+    // object, because there is no unique constraint on that column — hence forms?.[0] below.
+    // It is what lets the event name be a link straight to the Google Form, so an officer deciding
+    // what type something was can look at the form instead of hunting for it in Drive.
+    get('events?type_code=is.null&ignored_at=is.null&select=id,name,occurred_on,source,forms(form_id)&order=occurred_on.desc'),
+    // raw_payload carries what the person actually typed — their name, college, year and major.
+    // That is the material an officer needs to work out who a stray personal email belongs to.
+    get('unmatched_signins?resolved_at=is.null&select=id,raw_identifier,raw_payload,event_id,events(name,occurred_on,forms(form_id))&order=id.desc'),
     get('forms?unreadable_since=not.is.null&select=form_id,title,last_error,unreadable_since'),
     get('v_member_totals?select=netid,first_name,last_name,total_points&order=total_points.desc'),
   ]);
@@ -463,6 +490,47 @@ async function renderAttention(root) {
 
   const counts = await Promise.all(untyped.map((e) =>
     get(`attendance?event_id=eq.${e.id}&select=id`).then((r) => r.length)));
+
+  // An event's name, linked to its Google Form when we know which form produced it. Same URL shape
+  // and same /edit target as the unreadable-forms card below, so the two behave identically.
+  // Manual events (volunteering, anything typed in by hand) have no form and stay plain text.
+  const eventLink = (name, formId) => formId
+    ? `<a href="https://docs.google.com/forms/d/${esc(formId)}/edit" target="_blank" rel="noopener">${esc(name)}</a>`
+    : esc(name);
+
+  /**
+   * Pull a display name out of a sign-in's raw payload.
+   *
+   * Deliberately dumb: exact matches against a short list of question titles, no fuzziness. This
+   * feeds a human deciding whether two records are the same person, so a wrong guess here is worse
+   * than showing nothing — it would put a name beside an email that does not belong to it.
+   */
+  const payloadName = (payload) => {
+    const answers = Array.isArray(payload?.answers) ? payload.answers : [];
+    const pick = (...titles) => {
+      for (const a of answers) {
+        const q = String(a?.question ?? '').trim().toLowerCase();
+        if (titles.includes(q) && String(a?.answer ?? '').trim()) return String(a.answer).trim();
+      }
+      return '';
+    };
+    const full = pick('name', 'full name', 'preferred name');
+    if (full) return full;
+    return [pick('first name'), pick('last name')].filter(Boolean).join(' ');
+  };
+
+  /** Self-reported context from the payload. This, not the name, is what confirms a match. */
+  const payloadContext = (payload) => {
+    const answers = Array.isArray(payload?.answers) ? payload.answers : [];
+    const pick = (...titles) => {
+      for (const a of answers) {
+        const q = String(a?.question ?? '').trim().toLowerCase();
+        if (titles.includes(q) && String(a?.answer ?? '').trim()) return String(a.answer).trim();
+      }
+      return '';
+    };
+    return [pick('year', 'class level', 'class'), pick('college'), pick('major')].filter(Boolean).join(' · ');
+  };
 
   const typeButtons = (id) => state.eventTypes
     .map((t) => `<button class="ghost" data-type="${esc(t.code)}" data-event="${esc(id)}"${t.is_membership_form ? ' data-membership' : ''}>${esc(t.label)}</button>`)
@@ -476,7 +544,7 @@ async function renderAttention(root) {
         <tbody>${untyped.map((e, i) => `
           <tr>
             <td>${esc(e.occurred_on)}</td>
-            <td>${esc(e.name)} ${e.source === 'manual' ? '<span class="pill">manual</span>' : ''}</td>
+            <td>${eventLink(e.name, e.forms?.[0]?.form_id)} ${e.source === 'manual' ? '<span class="pill">manual</span>' : ''}</td>
             <td class="num">${counts[i]}</td>
             <td class="row">${typeButtons(e.id)}</td>
             <td><button class="ghost" data-dismiss="${esc(e.id)}">Not an event</button></td>
@@ -487,14 +555,32 @@ async function renderAttention(root) {
     ${detailsCard('att-unmatched', unmatched.length, `Unmatched sign-ins ${countTag(unmatched.length)}`,
       unmatched.length === 0 ? '<div class="empty">Nothing waiting.</div>' : `
       <div class="scroll"><table>
-        <thead><tr><th>Event</th><th>They entered</th><th>Correct netID</th><th></th></tr></thead>
-        <tbody>${unmatched.map((u) => `
+        <thead><tr><th>Event</th><th>Who signed in</th><th>Correct netID</th><th></th></tr></thead>
+        <tbody>${unmatched.map((u) => {
+          const who = payloadName(u.raw_payload);
+          const context = payloadContext(u.raw_payload);
+          return `
           <tr>
-            <td>${esc(u.events?.name ?? '')}</td>
-            <td><code>${esc(u.raw_identifier ?? '(blank)')}</code></td>
-            <td><input id="fix-${u.id}" size="12" placeholder="netid"></td>
-            <td><button class="act" data-resolve="${u.id}">Attach</button></td>
-          </tr>`).join('')}
+            <td>${eventLink(u.events?.name ?? '', u.events?.forms?.[0]?.form_id)}</td>
+            <td>
+              <div><code>${esc(u.raw_identifier ?? '(blank)')}</code></div>
+              ${who ? `<div><strong>${esc(who)}</strong></div>` : ''}
+              ${context ? `<div class="hint">${esc(context)}</div>` : ''}
+            </td>
+            <td>
+              <div class="row">
+                <input id="fix-${u.id}" size="12" placeholder="netid">
+                <input id="q-${u.id}" size="16" placeholder="search by name" value="${esc(who)}">
+                <button class="ghost" data-search="${u.id}">Find netID</button>
+              </div>
+              <div id="cand-${u.id}"></div>
+            </td>
+            <td class="row">
+              <button class="act" data-resolve="${u.id}">Attach</button>
+              <button class="ghost" data-drop="${u.id}">Dismiss</button>
+            </td>
+          </tr>`;
+        }).join('')}
         </tbody>
       </table></div>`)}
 
@@ -513,6 +599,11 @@ async function renderAttention(root) {
 
     ${detailsCard('att-nameless', nameless.length, `No name on file ${countTag(nameless.length)}`,
       nameless.length === 0 ? '<div class="empty">None.</div>' : `
+      <div class="row" style="margin-bottom:12px">
+        <button class="act" id="lookup-names">Look up 25 names in the Rice directory</button>
+        <span class="hint">Fills blanks only, never changes a name someone typed. Students who
+        hid their directory listing stay blank and need typing in by hand.</span>
+      </div>
       <div class="scroll"><table>
         <thead><tr><th>netID</th><th>Points</th><th>First</th><th>Last</th><th></th></tr></thead>
         <tbody>${nameless.map((t) => `
@@ -529,6 +620,16 @@ async function renderAttention(root) {
   wireCollapsibles(root);
 
   root.querySelectorAll('[data-type]').forEach((b) => b.onclick = () => guard(async () => {
+    // Typing something as a membership form is the one type change that DESTROYS data: the
+    // events_membership_retype_replays trigger deletes the event's attendance and resets the
+    // form's high-water mark so the poller re-sends everything into `memberships` instead.
+    // That is recoverable for responses the poller can replay, and NOT recoverable for attendance
+    // entered by hand or carried over by a migration, which no form will ever re-send. Every other
+    // button here is harmless and reversible, so this one asks first.
+    if (b.hasAttribute('data-membership') &&
+        !confirm('Membership forms record demographics instead of paying attendance points.\n\n'
+               + "This clears everything recorded against this event and re-reads the form from the "
+               + 'beginning. Any attendance added by hand will be lost.\n\nContinue?')) return;
     await patch(`events?id=eq.${b.dataset.event}`, { type_code: b.dataset.type, points: null });
     toast('Type set. Points awarded to everyone recorded.');
     show('attention');
@@ -556,6 +657,59 @@ async function renderAttention(root) {
     toast(`Attached to ${netid}.`);
     show('attention');
   }));
+
+  // Search Rice's directory by name to find the netID behind a personal email. Results are
+  // CANDIDATES: clicking one only fills the netID box, so an officer still presses Attach. The
+  // directory cannot verify a name the way it can verify a netID, so a human makes every call.
+  root.querySelectorAll('[data-search]').forEach((b) => b.onclick = () => guard(async () => {
+    const id = b.dataset.search;
+    const q = el(`q-${id}`).value.trim();
+    const out = el(`cand-${id}`);
+    if (!q) return toast('Type a name to search for.', true);
+    out.innerHTML = '<span class="hint">Searching…</span>';
+    const found = await edgeFn('directory-lookup', { mode: 'search', q });
+    if (found.tooBroad) {
+      out.innerHTML = '<span class="hint">That matches too many people. Try a full name.</span>';
+      return;
+    }
+    if (!found.results?.length) {
+      // Overwhelmingly this means the student hid their directory listing under FERPA, which is
+      // their choice and not something to work around. Typing the netID by hand still works.
+      out.innerHTML = '<span class="hint">No match. They may have hidden their directory listing — enter the netID by hand.</span>';
+      return;
+    }
+    out.innerHTML = found.results.map((r) => `
+      <div><button class="ghost" data-pick="${id}" data-netid="${esc(r.netid)}">${esc(r.name)} (${esc(r.netid)})</button>
+      <span class="hint">${esc([r.year, r.college, r.major].filter(Boolean).join(' · '))}</span></div>`).join('');
+    out.querySelectorAll('[data-pick]').forEach((p) => p.onclick = () => {
+      el(`fix-${p.dataset.pick}`).value = p.dataset.netid;
+      toast(`Filled ${p.dataset.netid}. Check it, then press Attach.`);
+    });
+  }));
+
+  // Dismiss a sign-in nobody can attach — a personal email with no Rice identity behind it, or a
+  // test submission. Soft on purpose: resolved_at marks it handled while resolved_netid stays
+  // null, so it leaves the queue but the raw payload is kept. Undo is `set resolved_at = null`.
+  root.querySelectorAll('[data-drop]').forEach((b) => b.onclick = () => guard(async () => {
+    if (!confirm('Dismiss this sign-in? It leaves the queue and nobody is credited for it.\n\n'
+               + 'What they submitted is kept, so this can be undone later.')) return;
+    await patch(`unmatched_signins?id=eq.${b.dataset.drop}`, { resolved_at: new Date().toISOString() });
+    toast('Dismissed.');
+    show('attention');
+  }));
+
+  if (el('lookup-names')) el('lookup-names').onclick = () => guard(async () => {
+    const button = el('lookup-names');
+    button.disabled = true;
+    button.textContent = 'Looking up…';
+    // Bounded per press rather than running all 91 at once: this is a courtesy call against a
+    // university service, and the module it goes through paces itself deliberately.
+    const r = await edgeFn('directory-lookup', { mode: 'fill-names', limit: 25 });
+    toast(r.remaining > 0
+      ? `Filled ${r.filled} of ${r.attempted}. ${r.remaining} still missing — press again.`
+      : `Filled ${r.filled} of ${r.attempted}. None left.`);
+    show('attention');
+  });
 
   root.querySelectorAll('[data-name]').forEach((b) => b.onclick = () => guard(async () => {
     const netid = b.dataset.name;
@@ -788,25 +942,62 @@ function parsePaste(text) {
 // Screen: Standings — presents data, recommends nobody.
 // ---------------------------------------------------------------------------
 async function renderStandings(root) {
-  const [totals, roleHolders] = await Promise.all([
-    get('v_member_totals?select=*&order=total_points.desc'),
+  // The all-time set, loaded once. It seeds the facet dropdowns and is what the "All time" range
+  // shows. member_totals_between(null, null) is the same query v_member_totals runs, so this is
+  // also the check that the ranged function agrees with the view it was derived from.
+  const [allTime, roleHolders, years] = await Promise.all([
+    rpc('member_totals_between', { p_from: null, p_to: null }),
     get(`roles?year_id=eq.${state.currentYear}&select=netid`),
+    get('academic_years?select=id,starts_on,ends_on,convention_on&order=starts_on.desc'),
   ]);
   const eboard = new Set(roleHolders.map((r) => r.netid));
 
   // Major, gender and class level are NULL for everyone until the annual membership form has
   // been ingested, so these open to nothing on a fresh database. That is a data gap, not a
   // defect, and a disabled control saying so beats a dropdown that appears broken.
+  //
+  // Built from the ALL-TIME set and never rebuilt when the range changes. Rebuilding would drop
+  // whichever option the officer had selected the moment they picked a range nobody in that major
+  // had points in, silently resetting their filter. A major that exists is a valid thing to filter
+  // by whether or not anyone scored in the window.
   const facet = (id, key, all) => {
-    const opts = [...new Set(totals.map((t) => t[key]).filter(Boolean))].sort();
+    const opts = [...new Set(allTime.map((t) => t[key]).filter(Boolean))].sort();
     return opts.length
       ? `<select id="${id}"><option value="">${all}</option>${opts.map((v) => `<option>${esc(v)}</option>`).join('')}</select>`
       : `<select id="${id}" disabled><option value="">No membership data yet</option></select>`;
   };
 
+  // The convention is the deliberation landmark: "how many points since we last went?" It is
+  // recorded per year because the date moves, and falls back to 30 October of the fall semester
+  // when nobody has filled it in — close enough to be useful, and editable in the year settings.
+  const conventionOf = (y) => y.convention_on || `${String(y.starts_on).slice(0, 4)}-10-30`;
+
+  const currentYear = years.find((y) => y.id === state.currentYear) || years[0];
+
+  // Presets are derived from the academic years in the database rather than hardcoded, so they
+  // stay right when the calendar shifts. Each is [from, to]; null means open-ended.
+  const presets = {
+    all: { label: 'All time', range: [null, null] },
+    ...(currentYear ? {
+      year: { label: `This year (${currentYear.id})`, range: [currentYear.starts_on, currentYear.ends_on] },
+      fall: { label: 'Fall semester', range: [currentYear.starts_on, `${String(currentYear.starts_on).slice(0, 4)}-12-31`] },
+      spring: { label: 'Spring semester', range: [`${Number(String(currentYear.starts_on).slice(0, 4)) + 1}-01-01`, currentYear.ends_on] },
+      convention: { label: 'Since last convention', range: [conventionOf(currentYear), null] },
+    } : {}),
+  };
+
   root.innerHTML = `
     <div class="card">
       <h2>Standings</h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="f-preset">${Object.entries(presets)
+          .map(([k, p]) => `<option value="${k}">${esc(p.label)}</option>`).join('')}
+          <option value="custom">Custom range…</option>
+        </select>
+        <label class="check">from <input type="date" id="f-from"></label>
+        <label class="check">to <input type="date" id="f-to"></label>
+        <span id="f-range-note" class="hint"></span>
+      </div>
       <div class="row" style="margin-bottom:16px">
         ${facet('f-major', 'major', 'All majors')}
         ${facet('f-gender', 'gender', 'All genders')}
@@ -819,6 +1010,8 @@ async function renderStandings(root) {
       <div id="standings-out" class="scroll"></div>
     </div>`;
 
+  let totals = allTime;
+  let range = [null, null];
   let view = [];
   function draw() {
     const major = el('f-major').value, gender = el('f-gender').value, cls = el('f-class').value;
@@ -853,10 +1046,49 @@ async function renderStandings(root) {
           </tr>`).join('')}
         </tbody>
       </table>
-      <p class="hint" style="margin-top:14px">${view.length} people shown.</p>`;
+      <p class="hint" style="margin-top:14px">${view.length} people shown${
+        range[0] || range[1]
+          ? `, counting points from ${range[0] ? esc(range[0]) : 'the beginning'} to ${range[1] ? esc(range[1]) : 'today'}.
+             Role bonuses count for the whole academic year they were awarded in, so they appear in
+             any range that overlaps that year.`
+          : '.'}</p>`;
+  }
+
+  /**
+   * Load a range and redraw. Async because the aggregation happens in Postgres, not here — the
+   * ledger is already past PostgREST's 1000-row response cap, so summing it in the browser would
+   * silently drop rows and quietly under-report people's points.
+   */
+  let seq = 0;
+  async function applyRange(from, to) {
+    const mine = ++seq;
+    const out = el('standings-out');
+    out.innerHTML = '<p class="hint">Loading…</p>';
+    const rows = await rpc('member_totals_between', { p_from: from || null, p_to: to || null });
+    // Two quick clicks on different presets can come back out of order, and the slower first
+    // response would then overwrite the fresher second one with numbers for the wrong range.
+    if (mine !== seq) return;
+    totals = rows;
+    range = [from || null, to || null];
+    draw();
   }
 
   ['f-major', 'f-gender', 'f-class', 'f-noeboard', 'f-nobonus'].forEach((id) => el(id).onchange = draw);
+
+  el('f-preset').onchange = () => guard(async () => {
+    const chosen = presets[el('f-preset').value];
+    if (!chosen) return; // "Custom range…" — the officer drives the date boxes themselves
+    const [from, to] = chosen.range;
+    el('f-from').value = from || '';
+    el('f-to').value = to || '';
+    await applyRange(from, to);
+  });
+
+  ['f-from', 'f-to'].forEach((id) => el(id).onchange = () => guard(async () => {
+    el('f-preset').value = 'custom';
+    await applyRange(el('f-from').value, el('f-to').value);
+  }));
+
   el('f-csv').onclick = () => {
     const rows = [['name', 'netid', 'points', 'events', 'role', 'manual', 'major', 'gender', 'class']]
       .concat(view.map((t) => [
@@ -867,7 +1099,11 @@ async function renderStandings(root) {
     const csv = rows.map((r) => r.map((c) => /[",]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : c).join(',')).join('\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = 'shpe-standings.csv';
+    // The filename carries the range, so two exports taken for different windows do not land in
+    // the officer's downloads folder as indistinguishable files.
+    a.download = range[0] || range[1]
+      ? `shpe-standings-${range[0] || 'start'}_${range[1] || 'today'}.csv`
+      : 'shpe-standings-all-time.csv';
     a.click();
   };
   draw();
@@ -1120,7 +1356,7 @@ async function toggleYearMenu() {
   const menu = el('year-menu');
   if (!menu.hidden) return closeYearMenu();
 
-  const years = await get('academic_years?select=id,starts_on,ends_on,forms_folder_id&order=starts_on.desc');
+  const years = await get('academic_years?select=id,starts_on,ends_on,forms_folder_id,convention_on&order=starts_on.desc');
 
   menu.innerHTML = `
     ${years.map((y) => `
@@ -1160,6 +1396,7 @@ function openYearDialog(year) {
   el('y-start').value = year ? year.starts_on : '';
   el('y-end').value = year ? year.ends_on : '';
   el('y-folder').value = year ? (year.forms_folder_id || '') : '';
+  el('y-convention').value = year ? (year.convention_on || '') : '';
 
   // The year ID is the primary key every membership, role and bonus row points at. Renaming it
   // is a real operation, not a settings tweak, so it is read-only once the year exists.
@@ -1182,11 +1419,13 @@ function wireYearDialog() {
     const startsOn = el('y-start').value;
     const endsOn = el('y-end').value;
     const folder = el('y-folder').value.trim() || null;
+    // Optional. Left blank, the Standings "since last convention" preset falls back to 30 October.
+    const convention = el('y-convention').value || null;
 
     if (editingYear) {
       if (!startsOn || !endsOn) return toast('Start and end dates are both required.', true);
       await patch(`academic_years?id=eq.${encodeURIComponent(editingYear.id)}`,
-        { starts_on: startsOn, ends_on: endsOn, forms_folder_id: folder });
+        { starts_on: startsOn, ends_on: endsOn, forms_folder_id: folder, convention_on: convention });
       d.close();
       toast(`Saved ${editingYear.id}.`);
       return show(state.tab);
