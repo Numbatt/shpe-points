@@ -47,7 +47,17 @@ including people who signed in weeks earlier. Forgetting delays points; it never
 
 **Unmatched sign-ins.** Someone typed something that isn't a Rice netID or Rice email — a personal
 Gmail, a typo, a phone number. The system refuses to guess, because guessing creates a fake person
-who then collects points. Type the correct netID and press Attach.
+who then collects points.
+
+The row shows you what they typed *and* the name, year, college and major they filled in on the
+form, which is usually enough to recognise them. Press **Find netID** to search Rice's directory
+by that name; matches appear with their year and college so you can check it really is the same
+person before clicking. Clicking a match only fills the box — you still press **Attach**.
+
+If nobody comes back, they have probably hidden their directory listing, which is their right.
+Type the netID by hand if you know it. If it genuinely isn't a Rice person, press **Dismiss**:
+the row leaves the queue, nobody is credited, and what they submitted is kept in case you change
+your mind.
 
 **Forms the poller cannot read.** See "The one rule" above.
 
@@ -134,8 +144,14 @@ become that year's membership records automatically.
 > | `College` | residential college | short answer or multiple choice |
 > | `Birthday` | birthday | a **Date** question, not a text one |
 >
-> Anything worded differently ("What's your major?", or just "major" in lowercase) is ignored and
-> that column stays blank. The member still gets a membership record and still earns points; they
+> Wording is more forgiving than it used to be: capitalisation no longer matters, and common
+> rephrasings are understood ("Year", "Class", "Grade" all mean class level; "What's your
+> major?" works). Class level is also recovered from the *answer* — if somebody answers
+> "Sophomore" to a question worded any way at all, it is understood.
+>
+> Major and gender are still matched strictly by question title, on purpose. There is no safe
+> way to guess what a major is from the answer, and a wrong guess would quietly corrupt the
+> numbers you deliberate over in October. Anything unrecognised leaves the column blank. The member still gets a membership record and still earns points; they
 > just cannot be placed in the October grid. The Roster tab shows you who that is.
 >
 > Also keep a netID or Rice email question on it, worded any way you like, exactly as on a normal
@@ -151,6 +167,12 @@ than reconstructing it in October.
 ## October — choosing who to sponsor
 
 The **Standings** tab is a lens, not an answer. It slices by major, gender, and class level, and
+by **date**: the range at the top lets you ask "how many points since the last convention?" or
+"how many this semester?" rather than only all-time. Pick a preset or set the two dates yourself,
+and the CSV you download matches whatever range is showing.
+
+Role bonuses count for the whole academic year they were awarded in, so an officer keeps their
+bonus in any range that touches that year. Everything else counts strictly by date. It also
 lets you exclude eboard members or role bonuses to see the underlying picture.
 
 **It does not and will not recommend anyone.** That's deliberate. Sponsorship depends on things
@@ -261,12 +283,13 @@ list is the difference between a system that survives and one that dies quietly.
 
 ## What's already working
 
-As of 30 July 2026, the database side is live and checked:
+As of 25 August 2026:
 
-- All historical points are migrated — **302 people, 840 attendance records, 1013 points**,
-  matching the old system exactly.
-- The public leaderboard on shpe.rice.edu keeps working, and now shows only names and totals.
-  NetIDs used to be readable by anyone on the internet; they aren't any more.
+- The whole pipeline runs. Forms in the watched Drive folder are found automatically, responses
+  become attendance, and tapping a type pays points to everyone already recorded.
+- **331 people, 1245 attendance records, 42 events** on record, from August 2024 to April 2026.
+- The public leaderboard on shpe.rice.edu keeps working and shows only names and totals. NetIDs
+  used to be readable by anyone on the internet; they aren't any more.
 - Only people on the officer list can see or change anything. Someone signing in with a Google
   account that isn't on the list sees nothing at all — this was tested, not assumed.
 
@@ -274,21 +297,20 @@ As of 30 July 2026, the database side is live and checked:
 
 Written honestly, so you know what you're inheriting:
 
-- **Sign-in isn't finished.** Google sign-in needs an OAuth client created in the Google Cloud
-  project `SHPE Rice` and its credentials pasted into Supabase. Until that's done, nobody can open
-  the dashboard. The Email provider should be switched off at the same time so Google is the only
-  way in.
-- **Backfill is not done.** The database holds events through **2 September 2025**. Fall 2025 from
-  that point on, and all of Spring 2026, still need importing before they count toward a convention
-  decision. The importer exists (`scripts/backfill.ts`) and has been tested against the old data;
-  it just hasn't been pointed at the real spreadsheets because they hadn't been found yet. Each
-  event needs a date and a type alongside its attendance.
-- **The ingestion pipeline has never run against a real form.** The Edge Function and the poller
-  are written, and the database side is tested, but nobody has created a real form in the real
-  folder and watched it flow through. Do this once with a throwaway event before relying on it.
-- **The dashboard isn't hosted anywhere.** It's a single file; any free static host works.
-- **Three people are identified by a personal email** rather than a netID, inherited from the old
-  spreadsheets. They keep their points, but if they sign in again they'll land in unmatched
-  sign-ins for you to attach.
-- **85 people have no name on record.** They're hidden from the public leaderboard rather than
-  shown as blank rows. The Roster tab lets you fill names in.
+- **14 events have no type yet**, so every GBM since August 2025 currently shows 0 points. Tapping
+  the type fixes each one instantly and pays everybody retroactively. **One warning before you go
+  down that list:** never tap **Membership** on an event unless it really is the membership form.
+  That button clears the event's attendance and re-reads the form from scratch, and the dashboard
+  will now ask you to confirm it for exactly that reason.
+- **No membership form has ever been read**, so nobody has a major, gender or class level on file
+  and the Standings filters are empty. The 2025-26 form was saved outside the watched folder, which
+  is the only reason. Move it in and it will be read on the next pass.
+- **91 people have no name.** Open **Needs attention → No name on file** and press
+  **Look up 25 names in the Rice directory**. It fills blanks only and never changes a name
+  somebody typed. Students who hid their directory listing stay blank and need typing in by hand.
+- **3 unmatched sign-ins** are waiting. All three can be resolved — use **Find netID** to search
+  the directory by the name they typed on the form.
+- **The public leaderboard shows all-time points**, including 2024-25. If the chapter wants it to
+  reset each year, that is one setting, and somebody has to decide.
+- **Adding officers still needs SQL.** Everything else about running the year is a button, but the
+  allowlist isn't. Ask whoever maintains the database.

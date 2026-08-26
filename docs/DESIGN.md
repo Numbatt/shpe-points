@@ -2,51 +2,42 @@
 
 > ## Current status — read this first
 >
-> *Last updated: 2026-08-02.*
+> *Last updated: 2026-08-25.*
 >
-> **Where things stand:** Phases 0, 1, 2, 3b and 3c are done. The `ingest-checkin` Edge Function is
-> **deployed and live**. Nothing has yet run against a real Google Form: the pipeline needs its
-> shared secret set and the Apps Script poller installed under the shared Gmail. See the phase
-> table at the bottom for the exact remaining steps.
+> **The system is live end to end.** The poller runs under the shared Gmail, the Edge Function
+> ingests, points flow, and the dashboard is deployed. The live database holds 331 people, 1245
+> attendance rows and 42 events spanning 2024-08-28 to 2026-04-16.
 >
-> ### Done and verified
+> ### What changed on 2026-08-25
 >
-> - **Phase 0.** Legacy schema audited and exported to `scripts/legacy-export/` (git-ignored; see
->   its `MANIFEST.md`). Row counts asserted against the audit before anything was touched.
-> - **Phase 1.** Eight migrations applied. The new schema holds **302 people, 840 attendance rows,
->   1013 points** — identical to the legacy totals, asserted by the migration itself rather than
->   checked afterwards.
-> - **Security.** The pre-existing exposure is closed. With the published anon key every base
->   table and internal view returns 401 and the `legacy` schema returns 404; only
->   `member_totals_all_time` is readable, exposing just `rank, first_name, last_name,
->   total_points`. Proven by query: a signed-in **non-officer** sees **0 rows** from
->   `v_member_totals`, `people` and `attendance`; an allowlisted officer sees 302 / 302 / 840.
-> - **Behaviour.** Dedup on repeat sign-in, untyped events ingesting at 0 points, tapping a type
->   paying retroactively, volunteer hours driving per-person points, and the configurable date
->   window all tested and passing.
-> - **Backfill importer** dry-run against the legacy data reproduces it exactly (837 rows
->   imported, 3 identities correctly refused rather than guessed).
+> - **The 2025-08-28 duplicate is reconciled.** The legacy spreadsheet import and the poller both
+>   produced an event for that GBM (the poller pulls a form's *entire* history on first discovery,
+>   and the backfill range reached to 2025-09-02). 72 people appeared on both. The form-backed event
+>   survives; see `migrations/20260825210000_reconcile_aug28_duplicate.sql` for the audit trail.
+> - **The membership template is no longer exact-match.** It now accepts normalized title aliases,
+>   and recovers `class_level` from the *answer* against a closed vocabulary. See "Where the line is
+>   drawn" in `functions/_shared/membership-template.ts` — the previous rule would have left class
+>   level blank for the entire chapter, because every real form asks "Year", not "Class Level".
+> - **Sign-in forms now gap-fill demographics**, filling only NULL columns on membership rows that
+>   already exist. A sign-in can never create a member: membership stays something you opt into by
+>   filling the form, so the Roster chase-list stays meaningful.
+> - **Standings takes a date range**, computed by `member_totals_between(from, to)` in SQL rather
+>   than in the browser — PostgREST caps responses at 1000 rows and the ledger is already past that,
+>   so client-side aggregation would silently under-report.
+> - **New Edge Function `directory-lookup`**, JWT-gated *and* `is_officer()`-gated. `verify_jwt`
+>   alone is not a gate: the anon key embedded in the dashboard is itself a valid project JWT.
+>   Verified live — anon key → 401, valid non-officer JWT → 403.
 >
-> ### Next actions
+> ### Still outstanding
 >
-> 1. **Set `INGEST_SHARED_SECRET`** on the Edge Function (Supabase → Edge Functions → Secrets).
->    Until it is set, every request to the function returns 401 — it fails closed, which is why
->    deploying it ahead of the secret is safe.
-> 2. **Install the poller.** Paste `apps-script/poller.js` into a script project owned by the
->    shared Gmail, set `INGEST_URL` and `INGEST_SECRET`, run `installTrigger` once.
-> 3. **Run the one-tap end-to-end test** (verification #2 below) with a real form.
-> 4. **Run the backfill** once the source sheets are located.
->
-> ### Still needed from Diego
->
-> - **The backfill sheets.** The gap is **wider than originally thought**: the newest event in the
->   database is 2025-09-02, so Fall 2025 from September onward *and* all of Spring 2026 are
->   missing. Each event also needs a date and a type.
-> - The points reset policy — current officers will decide. Until then: accumulate all-time,
->   filter by date at view time. Already what the schema does; no code waits on it.
->
-> Google sign-in is finished (`google: true`, `email: false`). The 2025-26 Drive folder ID is
-> recorded on that academic year.
+> - **2026-27 has no `forms_folder_id`.** The poller is watching nothing for the current year.
+>   This blocks the first GBM and is the single most urgent item.
+> - **The officer allowlist holds one person.** Adding this year's eboard is still a SQL insert;
+>   an Officers section in the dashboard is the highest-value remaining piece of the
+>   no-manual-changes rule.
+> - **`memberships` is empty** until the 2025-26 form is moved into a polled folder and typed.
+> - **`app_config.leaderboard_window_start` is `''`**, so the public leaderboard mixes 2024-25 and
+>   current-year points. The reset policy is still officers' to decide.
 >
 > **Context on the author:** Diego built the current system but is no longer an officer. This is
 > explicitly a handoff artifact for the next VP, who is not necessarily technical. When trading off

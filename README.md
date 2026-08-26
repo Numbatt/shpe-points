@@ -29,41 +29,44 @@ themselves.
 
 ## Status
 
-*2026-07-30.* **Phases 0–1 are applied and verified on the live database.** Phases 3–7 are written
-and committed; the ingestion pipeline has not yet run against a real Google Form.
+*2026-08-25.* **The system is live end to end.** The poller runs, forms ingest, points flow, and
+the dashboard is deployed. What remains before the first GBM of 2026-27 is listed under
+"Before the first GBM" below, and one of those items blocks this year's data entirely.
 
-**Done and verified**
+**Working and verified on the live database**
 
-- Legacy schema audited and exported to CSV; counts asserted against the audit, invariant recorded
-  in `scripts/legacy-export/MANIFEST.md`.
-- Eight migrations applied. The new schema holds **302 people, 840 attendance rows, 1013 points** —
-  identical to the legacy totals, asserted by the migration itself.
-- Public access locked down. With the published anon key, every base table and internal view
-  returns 401 and the `legacy` schema returns 404; only `member_totals_all_time` is readable, and
-  it exposes just `rank, first_name, last_name, total_points`.
-- RLS proven by query: a signed-in non-officer sees 0 rows from `v_member_totals`, `people` and
-  `attendance`; an allowlisted officer sees 302 / 302 / 840.
-- Behaviour tested: dedup on repeat sign-in, untyped events ingesting at 0 points, tapping a type
-  paying retroactively, volunteer hours driving per-person points, and the configurable date window.
-- Backfill importer dry-run against the legacy data reproduces it exactly (837 rows imported,
-  3 correctly refused).
+- **Ingestion is real.** The Apps Script poller discovered 14 Google Forms on 2026-08-10 and
+  pulled each one's full response history. The database holds **331 people, 1245 attendance rows,
+  42 events**, spanning 2024-08-28 to 2026-04-16.
+- **Backfill is complete for 2024-25.** The legacy spreadsheet import covers 2024-08-28 through
+  2025-09-02, typed and paid. Everything after that arrived through the live pipeline.
+- Security is unchanged and still holds: with the published anon key every base table returns 401
+  and only `member_totals_all_time` is readable. Officers see everything; non-officers see nothing.
+- Google sign-in is finished (`google: true`, `email: false`).
 
-**Outstanding**
+**Known gaps, in the order they bite**
 
-- **Google sign-in is not finished.** Cloud project `SHPE Rice` exists; still to do — create the
-  OAuth client (redirect URI `https://jzxxchjjhkbvfazrbeom.supabase.co/auth/v1/callback`), publish
-  the consent screen, paste the credentials into Supabase → Authentication → Providers → Google,
-  and **disable the Email provider** so Google is genuinely the only way in. Leave public signup
-  enabled — Supabase creates the auth user on first OAuth sign-in, so disabling it would reject
-  every officer's first login. `dr56@rice.edu` is already on the `officers` allowlist.
-- **No backfill has been run.** The database holds events through 2025-09-02; Fall 2025 from
-  September onward and all of Spring 2026 are still missing, and their source files have not been
-  located. The importer is written and dry-run tested — it needs the sheets, plus a date and type
-  for each event.
-- **The poller has never run against a real form** — that needs the shared Drive folder ID, and
-  the Edge Function needs deploying with its shared secret.
-- The dashboard is not deployed anywhere yet (it is one static file; any free host works).
-- Postgres has security patches available (platform-level upgrade).
+- **14 events are still untyped**, so every GBM since 2025-08-28 is currently worth 0 points.
+  Tapping a type pays retroactively, so nothing is lost — but read the warning below first.
+- **`memberships` is empty.** No membership form has ever been ingested: the 2025-26 one was filed
+  outside the polled Drive folder, so the poller never saw it. This is why major, gender and class
+  level are blank everywhere, and why nobody can be placed in the October deliberation grid yet.
+  Moving that form into the year's folder recovers it with no code changes.
+- **91 people have no name on record.** They are hidden from the public leaderboard rather than
+  shown blank. The "No name on file" card now fills these from the Rice directory in batches.
+- **3 unmatched sign-ins**, all recoverable — two resolve by directory name search, one is a typo
+  of a real netID.
+- `app_config.leaderboard_window_start` is empty, so the **public leaderboard shows all-time
+  totals**, mixing 2024-25 legacy points with the current year. That is a deliberate open decision,
+  not an oversight — set it when the chapter decides its reset policy.
+
+**Before the first GBM**
+
+1. **Set 2026-27's Drive folder ID** (year pill → gear). It is currently null, which means the
+   poller is watching **nothing** for this year and any form made for the GBM would be invisible.
+2. **Add this year's eboard to the `officers` allowlist.** Only `dr56@rice.edu` can sign in today.
+   There is no UI for this yet; it is a SQL insert.
+3. **Put the membership form in the polled folder** this time, and keep its question wording.
 
 **Handoff still open:** the Supabase project's ownership is unverified and likely a personal
 account. That is the single biggest risk to this system surviving; see the ownership checklist in
