@@ -25,7 +25,7 @@
  * know whether your own change is sound).
  */
 
-import { lookupNetid, lookupNetids, splitDirectoryName } from '../supabase/functions/_shared/directory.ts';
+import { lookupNetid, lookupNetids, searchDirectoryByName, splitDirectoryName } from '../supabase/functions/_shared/directory.ts';
 
 let passed = 0;
 let failed = 0;
@@ -42,9 +42,24 @@ function check(label: string, actual: unknown, expected: unknown): void {
   }
 }
 
-/** A fetch that returns a fixed body, so the parsing rules can be checked without the network. */
+/**
+ * A fetch that returns a fixed body, so the parsing rules can be checked without the network.
+ *
+ * Supplies `text()` as well as `json()` because the module reads the body as text and parses it
+ * itself — see parseDirectoryBody in directory.ts, which exists because the endpoint really does
+ * emit invalid JSON for some records. A stub offering only json() would make the module look
+ * broken while the real endpoint worked.
+ */
 const stubFetch = (body: unknown, ok = true) =>
-  (async () => ({ ok, json: async () => body })) as unknown as typeof fetch;
+  (async () => ({
+    ok,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  })) as unknown as typeof fetch;
+
+/** A fetch returning a raw string, for bodies that are not valid JSON at all. */
+const stubRawFetch = (raw: string, ok = true) =>
+  (async () => ({ ok, text: async () => raw })) as unknown as typeof fetch;
 
 async function main(): Promise<void> {
   const offline = process.argv.includes('--offline');
@@ -79,6 +94,58 @@ async function main(): Promise<void> {
   check('result named "None"', await lookupNetid('abc1', { fetchImpl: stubFetch({ results: [{ netid: 'abc1', name: 'None' }] }) }), null);
   check('netid comparison is case-insensitive', await lookupNetid('ABC1', { fetchImpl: stubFetch({ results: [{ netid: 'abc1', name: 'Right Person' }] }) }), { netid: 'abc1', firstName: 'Right', lastName: 'Person' });
   check('blank netid', await lookupNetid('   ', { fetchImpl: stubFetch({ results: [] }) }), null);
+
+  // The upstream bug this module works around: an unescaped nested array in `title` ends the
+  // string early and makes JSON.parse throw on the entire document, taking every other record in
+  // the response down with it. Verified live on ?q=garcia and ?q=rodriguez (2026-08-25). These
+  // pin the salvage path, because the symptom without it is "no match" for someone who is plainly
+  // in the directory — and the surnames affected are the ones this chapter's members have.
+  console.log('\nmalformed JSON salvage (the upstream bug)');
+  const MALFORMED = `{
+    "stats": { "count": "2", "error": false },
+    "results": [
+      {"netid":"bgl1", "name": "Brian Lee", "title": "["Head Coach Women's Soccer"]", "college": "None"},
+      {"netid":"abc1", "name": "Right Person", "college": "Wiess College", "major": "Bioengineering", "year": "Junior"}
+    ]
+  }`;
+  check(
+    'a record poisoned by an unescaped title does not hide the others',
+    await lookupNetid('abc1', { fetchImpl: stubRawFetch(MALFORMED) }),
+    { netid: 'abc1', firstName: 'Right', lastName: 'Person' },
+  );
+  const salvaged = await searchDirectoryByName('right person', { fetchImpl: stubRawFetch(MALFORMED) });
+  check('salvage recovers every record', salvaged.results.length, 2);
+  check('salvage keeps the context fields', salvaged.results[1], {
+    netid: 'abc1', name: 'Right Person', firstName: 'Right', lastName: 'Person',
+    college: 'Wiess College', major: 'Bioengineering', year: 'Junior',
+  });
+  check(
+    'salvage still refuses an ambiguous netid',
+    await lookupNetid('abc1', { fetchImpl: stubRawFetch(
+      '{"results":[{"netid":"abc1","name":"One Person","title":"["x"]"},{"netid":"abc1","name":"Two Person"}]}') }),
+    null,
+  );
+  check(
+    'unparseable garbage yields nothing rather than throwing',
+    await lookupNetid('abc1', { fetchImpl: stubRawFetch('<html>503</html>') }),
+    null,
+  );
+
+  console.log('\nsearchDirectoryByName — candidates for a human, never an answer');
+  check(
+    'too short to be a name',
+    await searchDirectoryByName('ab', { fetchImpl: stubFetch({ results: [{ netid: 'abc1', name: 'A B' }] }) }),
+    { results: [], truncated: false, tooBroad: false },
+  );
+  check(
+    'a query with no letters is not a name',
+    await searchDirectoryByName('123', { fetchImpl: stubFetch({ results: [] }) }),
+    { results: [], truncated: false, tooBroad: false },
+  );
+  const broad = await searchDirectoryByName('lee', {
+    fetchImpl: stubFetch({ stats: { count: '296' }, results: [{ netid: 'abc1', name: 'A Lee' }] }),
+  });
+  check('a mass match is refused as too broad, not returned', broad, { results: [], truncated: false, tooBroad: true });
 
   const throwingFetch = (async () => { throw new Error('network down'); }) as unknown as typeof fetch;
   check('network failure returns null rather than throwing', await lookupNetid('abc1', { fetchImpl: throwingFetch }), null);

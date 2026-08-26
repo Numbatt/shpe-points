@@ -39,6 +39,65 @@
 
 const DIRECTORY_ENDPOINT = 'https://search.rice.edu/json/people/p/0/0/';
 
+/**
+ * Read the endpoint's body, tolerating the malformed JSON it genuinely returns.
+ *
+ * THIS IS NOT DEFENSIVE PROGRAMMING, IT IS A WORKAROUND FOR A REAL UPSTREAM BUG. Some directory
+ * records carry a `title` whose value is a nested JSON array that was never escaped:
+ *
+ *     "title": "["Head Coach Women's Soccer"]",
+ *
+ * The inner quotes terminate the string early, so `JSON.parse` throws on the WHOLE document — one
+ * bad record poisons every other result in the same response, because this endpoint returns all
+ * matches in a single body. Verified 2026-08-25: `?q=garcia` (84 people) and `?q=rodriguez` (80)
+ * both fail to parse, while `?q=martinez` parses fine. That is not an acceptable failure mode for
+ * a SHPE chapter — those are precisely the surnames its members have, and the symptom is a search
+ * that says "no match" for someone who is plainly in the directory.
+ *
+ * So: try the real parser first, and only if it throws, salvage the handful of fields we actually
+ * read by scanning the raw text. The salvage deliberately does NOT try to repair the document or
+ * to read `title` — it slices the text at each `"netid":"` boundary and pulls four known-simple
+ * fields out of each chunk. If Rice ever fixes the escaping, this path simply stops being taken.
+ *
+ * Critically, salvaging changes nothing about SAFETY: lookupNetid still requires exactly one
+ * record whose own netid field equals the one requested, and searchDirectoryByName still returns
+ * candidates for a human. A salvaged record is held to the identical rule as a parsed one.
+ */
+function parseDirectoryBody(text: string): { records: Record<string, string>[]; reported: number } {
+  const reportedFrom = (t: string) => {
+    const m = t.match(/"count"\s*:\s*"?(\d+)"?/);
+    return m ? Number(m[1]) : NaN;
+  };
+
+  try {
+    const parsed = JSON.parse(text) as { results?: unknown; stats?: { count?: unknown } };
+    const results = Array.isArray(parsed?.results) ? (parsed.results as Record<string, string>[]) : [];
+    const count = Number(parsed?.stats?.count ?? results.length);
+    return { records: results, reported: Number.isFinite(count) ? count : results.length };
+  } catch {
+    // Salvage. Split at each record's leading netid key, then read only simple fields.
+    const records: Record<string, string>[] = [];
+    const field = (chunk: string, name: string) => {
+      const m = chunk.match(new RegExp(`"${name}"\\s*:\\s*"([^"]*)"`));
+      return m ? m[1] : '';
+    };
+    const parts = text.split(/"netid"\s*:\s*"/).slice(1);
+    for (const part of parts) {
+      const netid = part.slice(0, part.indexOf('"'));
+      if (!netid) continue;
+      records.push({
+        netid,
+        name: field(part, 'name'),
+        college: field(part, 'college'),
+        major: field(part, 'major'),
+        year: field(part, 'year'),
+      });
+    }
+    const count = reportedFrom(text);
+    return { records, reported: Number.isFinite(count) ? count : records.length };
+  }
+}
+
 /** One directory hit, already verified to belong to the netID that was asked for. */
 export interface DirectoryName {
   netid: string;
@@ -133,14 +192,16 @@ export async function lookupNetid(netid: string, options: LookupOptions = {}): P
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let body: unknown;
+  let records: Record<string, string>[];
   try {
     const res = await fetchImpl(url, {
       signal: controller.signal,
       headers: { accept: 'application/json' },
     });
     if (!res.ok) return null;
-    body = await res.json();
+    // .text() then parseDirectoryBody, not .json(): the endpoint emits invalid JSON for some
+    // records and .json() would throw on the whole response. See parseDirectoryBody's header.
+    records = parseDirectoryBody(await res.text()).records;
   } catch {
     // Network error, abort, or a body that isn't JSON. All of these mean "we don't know", and
     // "we don't know" is a supported, already-handled state. Never rethrow: a directory outage
@@ -150,11 +211,8 @@ export async function lookupNetid(netid: string, options: LookupOptions = {}): P
     clearTimeout(timer);
   }
 
-  const results = (body as { results?: unknown })?.results;
-  if (!Array.isArray(results)) return null;
-
   // The verification described above.
-  const matches = (results as DirectoryResult[]).filter(
+  const matches = (records as DirectoryResult[]).filter(
     (r) => String(r?.netid ?? '').trim().toLowerCase() === wanted,
   );
   if (matches.length !== 1) return null;
@@ -163,6 +221,114 @@ export async function lookupNetid(netid: string, options: LookupOptions = {}): P
   if (!split) return null;
 
   return { netid: wanted, firstName: split.firstName, lastName: split.lastName };
+}
+
+/** One candidate from a name search. Unverified by construction — a human picks from these. */
+export interface DirectoryCandidate {
+  netid: string;
+  /** The directory's display name, unsplit, so an officer sees exactly what Rice has. */
+  name: string;
+  firstName: string;
+  lastName: string | null;
+  /** Context for the human making the call. Null when the directory omits or suppresses it. */
+  college: string | null;
+  major: string | null;
+  year: string | null;
+}
+
+export interface DirectorySearch {
+  results: DirectoryCandidate[];
+  /** More matches existed than were returned. The officer should narrow the query. */
+  truncated: boolean;
+  /** The query matched so many people it is a browse, not a lookup. Returns no results. */
+  tooBroad: boolean;
+}
+
+/**
+ * Search the directory by NAME and return candidates for a human to choose between.
+ *
+ * READ THIS BEFORE USING IT: this is the deliberate INVERSE of lookupNetid above, and the
+ * inversion is the whole safety argument. lookupNetid refuses to answer unless exactly one result
+ * verifiably owns the netID that was asked for, because its answer is written to `people`
+ * unattended and nothing downstream would ever catch a wrong one. This function cannot verify
+ * anything — a name is not a key, two students share one, and the whole point is that the netID is
+ * the unknown. So it does not pretend: it returns a LIST, marked as candidates, and the only
+ * supported caller is a screen where an officer looks at each one, compares it against what the
+ * member typed on the form, and clicks. Nothing here may ever be written automatically. If you
+ * find yourself wanting to auto-apply `results[0]`, you want lookupNetid, not this.
+ *
+ * `college`, `major` and `year` come back for exactly that reason. The sign-in payload that
+ * produced the search already contains the member's self-reported college, year and major, so an
+ * officer can match on those rather than on a name alone — which is the difference between
+ * confirming a person and guessing at one. (Note this is the only place the module reads those
+ * fields. They are still never written to `memberships`: sourcing demographics from the registrar
+ * instead of from the member's own form is a separate decision nobody has made — docs/DESIGN.md.)
+ *
+ * The guards below exist because search.rice.edu/robots.txt disallows /json/ and this module's
+ * header commits to not walking the directory. A query of one or two characters, or one that
+ * matches half the university, is a crawl however it was intended, so it returns nothing.
+ */
+export async function searchDirectoryByName(
+  query: string,
+  options: LookupOptions & { limit?: number; maxCount?: number } = {},
+): Promise<DirectorySearch> {
+  const { timeoutMs = 8000, fetchImpl = fetch, limit = 10, maxCount = 50 } = options;
+  const empty: DirectorySearch = { results: [], truncated: false, tooBroad: false };
+
+  const q = String(query ?? '').replace(/\s+/g, ' ').trim();
+  // Two characters matches thousands of people; a query with no letter is not a name.
+  if (q.length < 3 || !/[a-z]/i.test(q)) return empty;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let parsed: { records: Record<string, string>[]; reported: number };
+  try {
+    const res = await fetchImpl(`${DIRECTORY_ENDPOINT}?q=${encodeURIComponent(q)}`, {
+      signal: controller.signal,
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return empty;
+    parsed = parseDirectoryBody(await res.text());
+  } catch {
+    // Same posture as lookupNetid: "we don't know" is a supported state, and an outage must never
+    // surface as an exception in a screen an officer is trying to clear a queue in.
+    return empty;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const results = parsed.records;
+  const reported = parsed.reported;
+  // The directory reports its own total, which is a better broadness signal than the page length.
+  if (Number.isFinite(reported) && reported > maxCount) {
+    return { results: [], truncated: false, tooBroad: true };
+  }
+
+  // "None" is the endpoint's literal string for an absent field, exactly as in splitDirectoryName.
+  const clean = (v: unknown): string | null => {
+    const s = String(v ?? '').trim();
+    return s === '' || s === 'None' ? null : s;
+  };
+
+  const candidates: DirectoryCandidate[] = [];
+  for (const raw of results as Record<string, unknown>[]) {
+    const netid = String(raw?.netid ?? '').trim().toLowerCase();
+    const split = splitDirectoryName(raw?.name as string | undefined);
+    if (!netid || !split) continue;
+    candidates.push({
+      netid,
+      name: String(raw?.name ?? '').trim(),
+      firstName: split.firstName,
+      lastName: split.lastName,
+      college: clean(raw?.college),
+      major: clean(raw?.major),
+      year: clean(raw?.year),
+    });
+    if (candidates.length >= limit) break;
+  }
+
+  return { results: candidates, truncated: candidates.length >= limit && results.length > limit, tooBroad: false };
 }
 
 /**
