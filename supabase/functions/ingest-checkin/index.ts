@@ -314,8 +314,12 @@ Deno.serve(async (req) => {
     // mirrors resolve_unmatched_signin's logic exactly (see the migration
     // 20260802150000_year_lifecycle_and_membership.sql) so a response landed live and one dragged
     // out of unmatched_signins by hand resolve to the same year.
+    //
+    // Resolved for EVERY event, not only membership forms: an ordinary sign-in form's demographic
+    // answers are used to gap-fill an existing membership row (see the gap-fill block below), and
+    // that write needs the same year_id resolved by the same rule. One extra query per form.
     let membershipYearId: string | null = null;
-    if (isMembershipForm) {
+    {
       const occurredOn = (event as Record<string, any>)?.occurred_on as string | undefined;
       if (occurredOn) {
         const { data: years } = await db
@@ -337,6 +341,11 @@ Deno.serve(async (req) => {
     // in a single statement. Keeping only the latest by submittedAt also gives a resubmission the
     // behavior an officer would expect: the correction wins.
     const membershipByKey = new Map<string, Record<string, unknown>>();
+    // Demographics harvested from an ORDINARY sign-in form, to fill blanks on membership rows that
+    // already exist. Keyed and deduped for the same reason as membershipByKey above: one statement
+    // must not touch the same (netid, year_id) twice. Kept in a separate map because the two have
+    // opposite write semantics — see gapfill_membership_demographics' migration.
+    const gapfillByKey = new Map<string, Record<string, unknown>>();
 
     for (const response of form.responses ?? []) {
       const answers = Array.isArray(response.answers) ? response.answers : [];
@@ -394,6 +403,28 @@ Deno.serve(async (req) => {
         source: 'form',
         recorded_at: response.submittedAt,
       });
+
+      // Gap-fill. Ordinary sign-in forms ask Gender/College/Year/Major too, and until now those
+      // answers were read and thrown away for every matched netID. They can only ever COMPLETE a
+      // membership row that already exists — never create one, never overwrite a non-null column.
+      // The database enforces both halves (the function is an UPDATE with coalesce), so this side
+      // just has to hand over what it saw.
+      //
+      // Unlike the membership path above, only the keys that actually resolved are sent: an
+      // explicit null here would be indistinguishable from "no answer" and coalesce would ignore
+      // it anyway, but sending it invites a future reader to add an INSERT and reintroduce the
+      // is_current_member problem.
+      if (membershipYearId) {
+        const demographics = extractMembershipDemographics(answers);
+        if (Object.keys(demographics).length > 0) {
+          const key = `${netid}|${membershipYearId}`;
+          const row = { netid, year_id: membershipYearId, ...demographics, submittedAt: response.submittedAt };
+          const existing = gapfillByKey.get(key);
+          if (!existing || String(response.submittedAt) > String(existing.submittedAt)) {
+            gapfillByKey.set(key, row);
+          }
+        }
+      }
     }
 
     const membershipRows = [...membershipByKey.values()];
@@ -445,6 +476,21 @@ Deno.serve(async (req) => {
       membershipsWritten = data?.length ?? 0;
     }
 
+    // Fill blanks on membership rows that already exist, from ordinary sign-in answers.
+    //
+    // Swallows every failure, exactly like fillMissingNames above: attendance is the thing that
+    // has to land. A demographics write is a convenience, and it must never be able to fail a pass
+    // that has already recorded who showed up — nor stop the high-water mark from advancing, which
+    // would make the next pass re-send everything.
+    let demographicsFilled = 0;
+    const gapfillRows = [...gapfillByKey.values()].map(({ submittedAt: _drop, ...row }) => row);
+    if (gapfillRows.length > 0) {
+      try {
+        const { data, error } = await db.rpc('gapfill_membership_demographics', { p_rows: gapfillRows });
+        if (!error && typeof data === 'number') demographicsFilled = data;
+      } catch { /* never fails a pass */ }
+    }
+
     if (unmatchedRows.length > 0) {
       await db.from('unmatched_signins').insert(unmatchedRows);
     }
@@ -463,6 +509,7 @@ Deno.serve(async (req) => {
       received: form.responses?.length ?? 0,
       recorded: inserted,
       membershipsRecorded: membershipsWritten,
+      demographicsFilled,
       unmatched: unmatchedRows.length,
       awaitingType: event?.type_code == null,
     });
