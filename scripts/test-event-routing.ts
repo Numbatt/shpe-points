@@ -45,11 +45,11 @@ check('a GBM that is also the membership form does BOTH',
 check('an untyped event with the flag still pays',
   routeEvent(ev(null, true)), { paysAttendance: true, collectsMembership: true });
 
-console.log('\nthe backfill-ran-once hole');
-// A backfill sets collects_membership on the membership-typed events that exist the day it runs.
-// An event typed `membership` for the first time AFTER that has the type and not the flag. Reading
-// the column alone would route its responses nowhere at all — no attendance, no memberships.
-check('a newly membership-typed event collects even without the flag',
+console.log('\nthe backstop');
+// events_membership_guard sets collects_membership whenever an event is typed as a membership
+// form, so this state should not occur. If it ever does, the response must still land somewhere:
+// paying no attendance AND collecting nothing would discard it silently.
+check('a membership type collects even if the flag somehow is not set',
   routeEvent(ev({ is_membership_form: true }, false)), { paysAttendance: false, collectsMembership: true });
 
 console.log('\nnulls, missing keys, and other things PostgREST actually returns');

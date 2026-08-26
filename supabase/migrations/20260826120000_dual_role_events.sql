@@ -23,17 +23,22 @@
 -- Why a column on `events` rather than reading event_types.is_membership_form: the flag has to be
 -- settable independently of the type, which is the entire point.
 --
--- The two are not redundant, and neither replaces the other. They answer different questions:
+-- The two still answer different questions, and neither replaces the other:
 --
 --   is_membership_form   -> this TYPE pays no attendance. Still a real thing: a standalone
 --                           membership drive that is not also a meeting.
---   collects_membership  -> this EVENT's form also declares who you are this year.
+--   collects_membership  -> this EVENT's form declares who you are this year.
 --
--- "Harvest demographics" is `is_membership_form OR collects_membership`, not the column alone. The
--- backfill below sets the column true for every membership-typed event that exists today, but a
--- backfill only runs once -- an event typed `membership` for the first time next year would have
--- the type and not the flag, and reading the column alone would send its responses nowhere at all.
--- Both the ingest function and resolve_unmatched_signin spell out the same OR for that reason.
+-- But the first IMPLIES the second, and the trigger below enforces that rather than leaving it to
+-- every reader to remember. Being the membership form is what the membership type means; an officer
+-- who taps it has already answered the question, and asking again would be asking twice. So
+-- `collects_membership` is the single column anything downstream needs to read.
+--
+-- Framed the way an officer actually thinks about it: a year has ONE membership form. Usually it is
+-- the first GBM's sign-in, because one form is what students fill out. Occasionally it is a
+-- standalone drive, which is what the membership type is for. It is not a property you re-decide
+-- for each of the twenty-odd events that follow -- it is one slot per year, and this column records
+-- which event fills it.
 --
 -- Why at most one per ACADEMIC YEAR: `memberships` is keyed `unique (netid, year_id)`. Two
 -- membership-collecting events in one year write to the same row, and the second one wins
@@ -51,11 +56,11 @@ begin;
 alter table public.events add column collects_membership boolean not null default false;
 
 comment on column public.events.collects_membership is
-  'True when this event''s form also collects membership demographics (major, class level, gender, ...), in addition to whatever its type_code pays. Set by an officer via the Membership toggle. False means the form is an ordinary sign-in and its demographic answers only gap-fill membership rows that already exist. Independent of type_code on purpose: one form can be both a GBM sign-in and the year''s membership form, which is what students actually fill out. At most one event per academic year may have this set -- see events_membership_is_exclusive. Clearing it back to false is safe and reversible; setting it forces the poller to replay the form''s full history so demographics already submitted are not stranded.';
+  'True on the ONE event per academic year whose form collects membership demographics (major, class level, gender, ...). Usually the first GBM''s sign-in, because one form is what students actually fill out; the event still pays whatever its type_code pays. False means an ordinary sign-in, whose demographic answers can only gap-fill membership rows that already exist, never create one. Set either by designating the event in the dashboard or, implicitly, by typing it as a membership form -- events_membership_guard keeps those in sync and enforces the one-per-year limit. Clearing it back to false frees the year for another event; setting it forces the poller to replay the form''s full history so demographics already submitted are not stranded.';
 
 -- Backfill: an event typed as a membership form was, by definition, already collecting membership.
--- This must run BEFORE the exclusivity trigger exists, or the trigger fires once per backfilled row
--- and rejects the second event in any year that legitimately has one today.
+-- This must run BEFORE the guard trigger exists, or the trigger fires once per backfilled row and
+-- rejects the second event in any year that legitimately has one today.
 update public.events e
    set collects_membership = true
   from public.event_types et
@@ -85,9 +90,30 @@ end
 $$;
 
 -- ---------------------------------------------------------------------------
--- 2. At most one membership-collecting event per academic year
+-- 2. One membership form per academic year, and a type that implies it
 -- ---------------------------------------------------------------------------
 
+-- Two rules, in one BEFORE trigger:
+--
+--   1. A membership TYPE implies collecting membership. Being the membership form is what that
+--      type MEANS -- an officer who taps it has already said the thing the flag says, and making
+--      them also tick a box would be asking the same question twice.
+--   2. At most one event per academic year collects membership.
+--
+-- They live in the same function deliberately. Rule 1 writes the column that rule 2 checks, so as
+-- two separate BEFORE triggers the outcome would depend on Postgres firing them in name order --
+-- an invariant held together by a coincidence of spelling. One function, one pass, no ordering.
+--
+-- Rule 1 is also what closes the gap the backfill above cannot: the backfill sets the flag for
+-- membership-typed events that exist TODAY, and it runs exactly once. Without this, an event typed
+-- `membership` for the first time next season would carry the type and not the flag, claim no
+-- year's slot, and slip straight past rule 2 -- two membership forms in one year, silently
+-- overwriting each other's demographics, which is the whole failure this migration exists to stop.
+--
+-- The reverse is NOT automatic: retyping away from `membership` leaves the flag set, because the
+-- form did collect those demographics and the event should keep the year's slot rather than
+-- silently vacate it. Giving the slot up is an explicit act on the Events screen.
+--
 -- Why a trigger and not a partial unique index: an index needs the year as a stored, immutable
 -- expression, and `events` has no year_id column (see 20260731024857_new_schema.sql) -- an event
 -- belongs to a year ONLY by its occurred_on falling inside academic_years.starts_on/ends_on. That
@@ -95,12 +121,18 @@ $$;
 -- reasoning is why v_points_ledger derives year_id rather than storing it.
 --
 -- BEFORE, not AFTER: this should reject the write, not undo it.
-create function public.events_membership_is_exclusive() returns trigger
+create function public.events_membership_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
   v_year_id text;
   v_existing text;
 begin
+  -- Rule 1.
+  if coalesce((select is_membership_form from public.event_types where code = new.type_code), false) then
+    new.collects_membership := true;
+  end if;
+
+  -- Rule 2 only has something to say about events that collect.
   if not new.collects_membership then
     return new;
   end if;
@@ -126,22 +158,25 @@ begin
   limit 1;
 
   if v_existing is not null then
-    raise exception '% already collects membership for %; clear it there first', v_existing, v_year_id;
+    raise exception '% is already the membership form for %; clear it on the Events screen first', v_existing, v_year_id;
   end if;
 
   return new;
 end
 $$;
 
-revoke all on function public.events_membership_is_exclusive() from public, anon, authenticated;
+revoke all on function public.events_membership_guard() from public, anon, authenticated;
 
--- occurred_on is in the trigger's column list too: moving an event's date can carry it into a year
--- that already has a membership form, which is the same collision arriving by a different door.
-create trigger events_membership_is_exclusive
-before insert or update of collects_membership, occurred_on on public.events
+-- type_code is in the column list because rule 1 reads it. occurred_on is there because moving an
+-- event's date can carry it into a year that already has a membership form -- the same collision
+-- arriving by a different door.
+--
+-- No WHEN clause: rule 1 has to run in order to SET collects_membership, so a WHEN that tested the
+-- flag would skip exactly the case the rule exists for.
+create trigger events_membership_guard
+before insert or update of type_code, collects_membership, occurred_on on public.events
 for each row
-when (new.collects_membership)
-execute function public.events_membership_is_exclusive();
+execute function public.events_membership_guard();
 
 -- ---------------------------------------------------------------------------
 -- 3. Rework the replay trigger so it stops destroying attendance

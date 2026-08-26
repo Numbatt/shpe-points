@@ -105,7 +105,7 @@ select t('the event still pays its GBM point',
 -- ---------------------------------------------------------------------------
 select t_raises('a second membership event in the same year is rejected',
   $$update events set collects_membership = true where id = 'e0000000-0000-0000-0000-000000000002'$$,
-  'already collects membership');
+  'is already the membership form');
 
 select t('...and the rejected event was not modified',
   (select not collects_membership from events where id = 'e0000000-0000-0000-0000-000000000002'));
@@ -131,7 +131,38 @@ select t_raises('an event no academic year covers is refused, not silently accep
 -- The collision can also arrive by moving a date into an occupied year.
 select t_raises('moving an event into an occupied year is caught too',
   $$update events set occurred_on = '2025-10-01' where id = 'e0000000-0000-0000-0000-000000000003'$$,
-  'already collects membership');
+  'is already the membership form');
+
+-- ---------------------------------------------------------------------------
+-- 3b. A membership TYPE implies collecting membership, and obeys the same limit
+-- ---------------------------------------------------------------------------
+
+-- The backfill runs once. An event typed `membership` for the first time AFTER it must still claim
+-- its year's slot, or two membership forms could coexist and silently overwrite each other.
+insert into events (id, name, type_code, occurred_on, points, source) values
+  ('e0000000-0000-0000-0000-000000000010', 'Late-typed drive', null, '2027-09-01', null, 'form');
+insert into academic_years (id, starts_on, ends_on) values ('2027-28', '2027-08-01', '2028-07-31');
+update events set type_code = 'membership' where id = 'e0000000-0000-0000-0000-000000000010';
+
+select t('typing an event as a membership form sets collects_membership',
+  (select collects_membership from events where id = 'e0000000-0000-0000-0000-000000000010'));
+
+insert into events (id, name, type_code, occurred_on, points, source) values
+  ('e0000000-0000-0000-0000-000000000011', 'A second drive, same year', null, '2027-10-01', null, 'form');
+select t_raises('...so a SECOND membership-typed event in that year is rejected',
+  $$update events set type_code = 'membership' where id = 'e0000000-0000-0000-0000-000000000011'$$,
+  'is already the membership form');
+
+select t_raises('...and inserting one already typed is rejected too',
+  $$insert into events (name, type_code, occurred_on, points, source)
+    values ('Straight in', 'membership', '2027-11-01', 0, 'form')$$,
+  'is already the membership form');
+
+-- Retyping away leaves the slot claimed: the form did collect those demographics, and giving the
+-- slot up is an explicit act rather than a side effect of fixing a type.
+update events set type_code = 'gbm' where id = 'e0000000-0000-0000-0000-000000000010';
+select t('retyping away from membership keeps the year''s slot claimed',
+  (select collects_membership from events where id = 'e0000000-0000-0000-0000-000000000010'));
 
 -- ---------------------------------------------------------------------------
 -- 4. Pure membership form still deletes, and the manual-event guard still holds
@@ -153,10 +184,16 @@ select t('a PURE membership form still clears its 0-point rows',
 select t('...and still resets its high-water mark',
   (select last_response_at is null from forms where form_id = 'form-e5'));
 
+-- Needs a year whose slot is free, because typing `membership` now claims one (rule 1 above).
+-- The point of this check is the OTHER guard: an event with no forms row has no replay source, so
+-- its attendance must survive a mis-tap that would delete a form-backed event's.
+insert into academic_years (id, starts_on, ends_on) values ('2028-29', '2028-08-01', '2029-07-31');
+update events set occurred_on = '2028-09-01' where id = 'e0000000-0000-0000-0000-000000000004';
 update events set type_code = 'membership' where id = 'e0000000-0000-0000-0000-000000000004';
 select t('a MANUAL event with no form keeps its attendance (nothing could replay it)',
   (select count(*) = 1 from attendance where event_id = 'e0000000-0000-0000-0000-000000000004'));
-update events set type_code = null where id = 'e0000000-0000-0000-0000-000000000004';
+update events set type_code = null, collects_membership = false
+ where id = 'e0000000-0000-0000-0000-000000000004';
 
 -- ---------------------------------------------------------------------------
 -- 5. Audit trail

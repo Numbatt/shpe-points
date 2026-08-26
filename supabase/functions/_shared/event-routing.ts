@@ -46,10 +46,13 @@ export interface EventRouting {
  * untyped event — at 0 points for now, restamped when the type is finally tapped, which is the
  * "forgetting the type delays points, it never loses them" guarantee.
  *
- * `is_membership_form ||` in the second line is NOT redundant with the column. 20260826120000
- * backfills collects_membership true for membership-typed events, but a backfill runs once: an
- * event typed `membership` for the first time next season has the type and not the flag, and
- * reading the column alone would route its responses nowhere at all.
+ * `is_membership_form ||` in the second line is a backstop, not the mechanism. The database keeps
+ * the two in sync — events_membership_guard (20260826120000) sets collects_membership whenever an
+ * event is typed as a membership form, because being the membership form is what that type means —
+ * so in a healthy database the OR never changes the answer. It is here because the failure it
+ * guards is silent and expensive: a membership-typed event whose flag somehow is not set would pay
+ * no attendance AND collect no demographics, discarding the responses entirely. Falling back to the
+ * type costs nothing and makes that unreachable from this side.
  */
 export function routeEvent(event: EventRoutingInput | null | undefined): EventRouting {
   const isMembershipForm = event?.event_types?.is_membership_form === true;
