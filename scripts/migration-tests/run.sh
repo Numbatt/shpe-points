@@ -81,6 +81,20 @@ psql_run main -f /tmp/tests/dual-role.sql | tail -40
 psql_run main -t -c "select count(*) from _t where not ok" | grep -q '^ *0$' || fail=1
 
 echo
+echo "==> behaviour: dedupe unmatched_signins"
+DEDUPE=20260827000000_dedupe_unmatched_signins.sql
+
+# Seed the pre-existing-duplicate shape BEFORE the dedupe migration runs (it needs the table in its
+# pre-migration state, with no response_id column yet), then apply that one migration and assert.
+build_db dedupe "$DEDUPE"
+psql_run dedupe -f /tmp/tests/dedupe-seed.sql >/dev/null
+if ! psql_run dedupe -f "/tmp/migrations/$DEDUPE" >/dev/null 2>"$ERRLOG"; then
+  echo "MIGRATION FAILED: $DEDUPE"; cat "$ERRLOG"; exit 1
+fi
+psql_run dedupe -f /tmp/tests/dedupe-assert.sql | tail -40
+psql_run dedupe -t -c "select count(*) from _t where not ok" | grep -q '^ *0$' || fail=1
+
+echo
 echo "==> behaviour: the collects_membership backfill"
 DUAL=20260826120000_dual_role_events.sql
 

@@ -526,8 +526,14 @@ Deno.serve(async (req) => {
       } catch { /* never fails a pass */ }
     }
 
+    // Dedup, mirroring the attendance upsert above: a re-polled response that is still unattached
+    // must not create a second row every time the poller sees it again. Keyed on responseId rather
+    // than netid (unmatchedRows has none, by definition) via the generated `response_id` column and
+    // its unique index added in 20260827000000_dedupe_unmatched_signins.sql.
     if (unmatchedRows.length > 0) {
-      await db.from('unmatched_signins').insert(unmatchedRows);
+      await db
+        .from('unmatched_signins')
+        .upsert(unmatchedRows, { onConflict: 'event_id,response_id', ignoreDuplicates: true });
     }
 
     // Advance the high-water mark only after everything above succeeded. If this function throws
