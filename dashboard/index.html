@@ -84,7 +84,7 @@
   nav button:hover { color: var(--ink); }
   nav button[aria-current="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
-  main { padding: 0 24px 80px; max-width: 1280px; }
+  main { padding: 0 24px 80px; max-width: 1440px; }
 
   /* ---- sections: full bleed, divided by one hairline -------------------- */
   /* The divider sits on the top of each section rather than the bottom, so a section that is
@@ -149,7 +149,7 @@
   /* ---- tables ---------------------------------------------------------- */
   .scroll { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
-  th, td { text-align: left; padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   th {
     color: var(--faint); font-weight: 500; font-size: 11px;
     text-transform: uppercase; letter-spacing: .09em;
@@ -178,6 +178,27 @@
      stay legible, or the row would be unreadable rather than merely quiet. */
   tr.dim td { color: var(--faint); }
   tr.dim a { color: inherit; }
+
+  /* An action cell that must never wrap its buttons onto a second line, however cramped the
+     column beside it gets (e.g. the netID-lookup column, which holds two inputs and a button).
+     Reserving min-width means the squeeze lands on that neighbour, not here. */
+  td.actions { white-space: nowrap; min-width: 168px; }
+  td.actions.row { flex-wrap: nowrap; }
+
+  /* The "search a different spelling" box beside "Look up netID": secondary to the name already
+     shown one column over, so it reads smaller and muted rather than repeating it at full size. */
+  input.search-alt { font-size: 12px; color: var(--muted); padding: 4px 7px; width: 120px; }
+
+  /* Directory-lookup candidates, shared by the unmatched-signins search and the per-row "No name
+     on file" lookup. A compact bordered chip per candidate, stacked, rather than a loose block —
+     so a result never shifts the height of the rows above or below it awkwardly. */
+  .cand-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .cand-chip {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    border: 1px solid var(--line-strong); border-radius: 4px; padding: 5px 9px; font-size: 13px;
+  }
+  .cand-chip button.ghost { padding: 2px 8px; font-size: 13px; }
+  .cand-chip .meta { color: var(--muted); font-size: 12px; }
 
   /* ---- year switcher ---------------------------------------------------- */
   /* The current year is the one piece of global state every screen keys off, so it doubles as
@@ -452,6 +473,49 @@ async function guard(fn) {
   catch (e) { console.error(e); toast(e.message.slice(0, 200), true); }
 }
 
+/**
+ * Retry an async call a few times with an increasing delay, rather than let one hiccup against a
+ * university service stop the whole run. Used by the "look up names" bulk loop, where a single
+ * failed batch used to silently end the pass and leave the rest of the queue unresolved.
+ */
+async function withRetry(fn, attempts = 3, delayMs = 400) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn(); }
+    catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Render directory-lookup candidates as compact chips into `out`, one per line, and wire each
+ * chip's button to `onPick(candidate)`. Shared by the unmatched-signins netID search and the
+ * per-row "No name on file" lookup so both read the same way. Never picks automatically — see
+ * searchDirectoryByName's header in supabase/functions/_shared/directory.ts for why a human makes
+ * every call.
+ */
+function renderCandidates(out, found, onPick) {
+  if (found.tooBroad) {
+    out.innerHTML = '<span class="hint">That matches too many people. Try a full name.</span>';
+    return;
+  }
+  if (!found.results?.length) {
+    out.innerHTML = '<span class="hint">No match. They may have hidden their directory listing — enter it by hand.</span>';
+    return;
+  }
+  out.innerHTML = `<div class="cand-list">${found.results.map((r, i) => `
+    <div class="cand-chip">
+      <button class="ghost" data-cand="${i}">${esc(r.name)}</button>
+      <code>${esc(r.netid)}</code>
+      <span class="meta">${esc([r.year, r.college, r.major].filter(Boolean).join(' · '))}</span>
+    </div>`).join('')}</div>`;
+  out.querySelectorAll('[data-cand]').forEach((btn) =>
+    btn.onclick = () => onPick(found.results[Number(btn.dataset.cand)]));
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -460,29 +524,35 @@ async function guard(fn) {
 // open holds collapsible section state (see sectionOpen below), keyed by section id, for the
 // same reason: a mutation re-renders the screen and the officer should not lose what they had
 // open or closed.
-const state = { eventTypes: [], currentYear: null, tab: 'attention', volunteerEventId: null, open: {} };
+// eventsShowOthers lives here for the same reason volunteerEventId does: it should survive the
+// re-render a mutation on the Events screen triggers, not reset every time.
+const state = {
+  eventTypes: [], currentYear: null, tab: 'attention', volunteerEventId: null, open: {},
+  eventsShowOthers: false,
+};
 
 const TABS = [
   ['attention', 'Needs attention'],
   ['events', 'Events'],
   ['volunteering', 'Volunteering'],
   ['standings', 'Standings'],
-  ['roster', 'Roster'],
   ['roles', 'Roles'],
   ['adjustments', 'Adjustments'],
+  ['officers', 'Officers'],
+  ['audit', 'Audit Log'],
 ];
 
 // ---------------------------------------------------------------------------
-// Collapsible sections — used by Needs attention (every section) and Roster (one per
-// academic year). Built on <details>/<summary> rather than a custom show/hide so the browser
-// handles keyboard operation and accessibility for free.
+// Collapsible sections — used by Needs attention (every section) and Events (one per academic
+// year). Built on <details>/<summary> rather than a custom show/hide so the browser handles
+// keyboard operation and accessibility for free.
 // ---------------------------------------------------------------------------
 
 /**
  * Open/closed state for a collapsible section, persisted in state.open so it survives the
  * show() re-render that follows a mutation. Defaults to open when the section's count is
  * greater than zero, or when forceOpen says the section is worth showing regardless of count
- * (e.g. the current academic year on Roster, even with zero membership rows).
+ * (e.g. the current academic year on Events, even with zero events).
  */
 function sectionOpen(id, count, forceOpen = false) {
   if (!(id in state.open)) state.open[id] = count > 0 || forceOpen;
@@ -547,8 +617,8 @@ async function renderAttention(root) {
         .filter((e) => e.forms?.length)
     : [];
 
-  // Moved here from Roster: it is an actionable queue (an officer types in a name and saves),
-  // and Roster is browse-only now.
+  // An actionable queue: an officer types in a name (or looks one up in the Rice directory) and
+  // saves. Standings shows the same people browse-only, with everyone else, once they have one.
   const nameless = totals.filter((t) => !t.first_name && !t.last_name);
 
   const counts = await Promise.all(untyped.map((e) =>
@@ -596,8 +666,8 @@ async function renderAttention(root) {
     ${mfCandidates.length === 0 ? '' : detailsCard('att-membership', 1,
       `Membership form for ${esc(year.id)} ${countTag(1)}`, `
       <div class="hint" style="margin-bottom:12px">
-        Nothing is collecting membership information for ${esc(year.id)} yet, so the Roster will stay
-        empty and nobody counts as a member. Usually this is the first GBM&#39;s sign-in &mdash; one form
+        Nothing is collecting membership information for ${esc(year.id)} yet, so Standings&#39; Membership
+        facet will stay empty and nobody counts as a member. Usually this is the first GBM&#39;s sign-in &mdash; one form
         is what students actually fill out. Picking it re-reads that form from the beginning and
         fills in majors, class levels and colleges. Everyone keeps the points they already have.
       </div>
@@ -642,12 +712,15 @@ async function renderAttention(root) {
             <td>
               <div class="row">
                 <input id="fix-${u.id}" size="12" placeholder="netid">
-                <input id="q-${u.id}" size="16" placeholder="search by name" value="${esc(who)}">
-                <button class="ghost" data-search="${u.id}">Find netID</button>
+                <button class="ghost" data-search="${u.id}">Look up netID</button>
               </div>
+              <!-- The name is already shown under "Who signed in" one column over, so this stays
+                   small and muted: a secondary "search a different spelling" box, not a second
+                   display of the same name. -->
+              <input class="search-alt" id="q-${u.id}" placeholder="or search a different spelling" value="${esc(who)}">
               <div id="cand-${u.id}"></div>
             </td>
-            <td class="row">
+            <td class="row actions">
               <button class="act" data-resolve="${u.id}">Attach</button>
               <button class="ghost" data-drop="${u.id}">Dismiss</button>
             </td>
@@ -672,7 +745,7 @@ async function renderAttention(root) {
     ${detailsCard('att-nameless', nameless.length, `No name on file ${countTag(nameless.length)}`,
       nameless.length === 0 ? '<div class="empty">None.</div>' : `
       <div class="row" style="margin-bottom:12px">
-        <button class="act" id="lookup-names">Look up 25 names in the Rice directory</button>
+        <button class="act" id="lookup-names">Look up names in the Rice directory</button>
         <span class="hint">Fills blanks only, never changes a name someone typed. Students who
         hid their directory listing stay blank and need typing in by hand.</span>
       </div>
@@ -684,7 +757,13 @@ async function renderAttention(root) {
             <td class="num">${t.total_points}</td>
             <td><input id="fn-${esc(t.netid)}" size="10"></td>
             <td><input id="ln-${esc(t.netid)}" size="10"></td>
-            <td><button class="act" data-name="${esc(t.netid)}">Save</button></td>
+            <td>
+              <div class="row actions">
+                <button class="act" data-name="${esc(t.netid)}">Save</button>
+                <button class="ghost" data-namesearch="${esc(t.netid)}">Look up</button>
+              </div>
+              <div id="ncand-${esc(t.netid)}"></div>
+            </td>
           </tr>`).join('')}
         </tbody>
       </table></div>`)}`;
@@ -731,22 +810,9 @@ async function renderAttention(root) {
     if (!q) return toast('Type a name to search for.', true);
     out.innerHTML = '<span class="hint">Searching…</span>';
     const found = await edgeFn('directory-lookup', { mode: 'search', q });
-    if (found.tooBroad) {
-      out.innerHTML = '<span class="hint">That matches too many people. Try a full name.</span>';
-      return;
-    }
-    if (!found.results?.length) {
-      // Overwhelmingly this means the student hid their directory listing under FERPA, which is
-      // their choice and not something to work around. Typing the netID by hand still works.
-      out.innerHTML = '<span class="hint">No match. They may have hidden their directory listing — enter the netID by hand.</span>';
-      return;
-    }
-    out.innerHTML = found.results.map((r) => `
-      <div><button class="ghost" data-pick="${id}" data-netid="${esc(r.netid)}">${esc(r.name)} (${esc(r.netid)})</button>
-      <span class="hint">${esc([r.year, r.college, r.major].filter(Boolean).join(' · '))}</span></div>`).join('');
-    out.querySelectorAll('[data-pick]').forEach((p) => p.onclick = () => {
-      el(`fix-${p.dataset.pick}`).value = p.dataset.netid;
-      toast(`Filled ${p.dataset.netid}. Check it, then press Attach.`);
+    renderCandidates(out, found, (r) => {
+      el(`fix-${id}`).value = r.netid;
+      toast(`Filled ${r.netid}. Check it, then press Attach.`);
     });
   }));
 
@@ -771,16 +837,36 @@ async function renderAttention(root) {
     show('attention');
   });
 
+  // Loops fill-names automatically until nothing is left, rather than making an officer press
+  // the button once per 25. Each call still only sends one batch of 25 to Rice — that per-call
+  // ceiling and its 150ms-per-lookup pacing (supabase/functions/_shared/directory.ts) are the
+  // real courtesy behaviour and stay unchanged; looping just removes the manual re-press.
+  //
+  // Each round writes straight to `people` before the next one starts (see the edge function),
+  // so nothing is lost if an officer navigates away mid-run — the next visit here just picks up
+  // wherever `remaining` left off.
   if (el('lookup-names')) el('lookup-names').onclick = () => guard(async () => {
     const button = el('lookup-names');
     button.disabled = true;
     button.textContent = 'Looking up…';
-    // Bounded per press rather than running all 91 at once: this is a courtesy call against a
-    // university service, and the module it goes through paces itself deliberately.
-    const r = await edgeFn('directory-lookup', { mode: 'fill-names', limit: 25 });
-    toast(r.remaining > 0
-      ? `Filled ${r.filled} of ${r.attempted}. ${r.remaining} still missing — press again.`
-      : `Filled ${r.filled} of ${r.attempted}. None left.`);
+
+    let filled = 0, remaining = Infinity;
+    try {
+      while (remaining > 0) {
+        const r = await withRetry(() => edgeFn('directory-lookup', { mode: 'fill-names', limit: 25 }));
+        filled += r.filled;
+        remaining = r.remaining;
+        if (r.attempted === 0) break; // nothing left to read, whatever remaining last said
+        button.textContent = remaining > 0 ? `Filled ${filled} of ${filled + remaining}…` : `Filled ${filled}. Done.`;
+      }
+      toast(remaining > 0
+        ? `Filled ${filled}. ${remaining} still have no directory match — they may have hidden their listing.`
+        : `Filled ${filled}. None left.`, remaining > 0);
+    } catch (e) {
+      // A batch failed three times in a row (withRetry gave up). Report where the run stopped
+      // rather than let guard()'s generic handler swallow the progress made so far.
+      toast(`Stopped after filling ${filled}: ${e.message.slice(0, 150)}`, true);
+    }
     show('attention');
   });
 
@@ -791,6 +877,21 @@ async function renderAttention(root) {
     await patch(`people?netid=eq.${encodeURIComponent(netid)}`, { first_name: first || null, last_name: last || null });
     toast(`Saved ${netid}.`);
     show('attention');
+  }));
+
+  // Per-row lookup, for resolving one person without running the bulk pass. Rice's directory
+  // search matches on netID as well as name, so searching by the netID already on file is enough
+  // to find their record and read the name off it.
+  root.querySelectorAll('[data-namesearch]').forEach((b) => b.onclick = () => guard(async () => {
+    const netid = b.dataset.namesearch;
+    const out = el(`ncand-${netid}`);
+    out.innerHTML = '<span class="hint">Searching…</span>';
+    const found = await edgeFn('directory-lookup', { mode: 'search', q: netid });
+    renderCandidates(out, found, (r) => {
+      el(`fn-${netid}`).value = r.firstName || '';
+      el(`ln-${netid}`).value = r.lastName || '';
+      toast('Filled from the directory. Check it, then press Save.');
+    });
   }));
 }
 
@@ -812,7 +913,7 @@ async function renderEvents(root) {
     get('events?select=id,name,occurred_on,type_code,points,source,ignored_at,ignored_by,collects_membership,forms(form_id)&order=occurred_on.desc'),
     // Every count on this screen in one query. An `in.(...)` list of event ids would work today and
     // get longer every year until it hits a URL limit; the whole ledger is a few thousand narrow
-    // rows and is what Roster and Standings already pull. Tallied client-side below.
+    // rows and is what Standings already pulls. Tallied client-side below.
     get('attendance?select=event_id,points_awarded'),
   ]);
 
@@ -864,7 +965,12 @@ async function renderEvents(root) {
       </tr>`;
   };
 
-  root.innerHTML = groups.map((g) => detailsCard(
+  // The global year selector otherwise changed nothing visible here: every year's events were
+  // always rendered, just collapsed, so switching years meant scrolling to see which card opened.
+  // The current year's card is now the only one shown by default; every other year (and anything
+  // outside every year — the orphan bucket above) sits behind an explicit "Show other years"
+  // toggle, so switching years in the header visibly changes what this screen shows.
+  const groupCard = (g) => detailsCard(
     `events-${g.id}`, g.events.length,
     `${esc(g.id)} ${countTag(g.events.length, false)}`,
     g.events.length === 0 ? '<div class="empty">No events.</div>' : `
@@ -872,9 +978,28 @@ async function renderEvents(root) {
       <thead><tr><th>Date</th><th>Event</th><th>Type</th><th>People</th><th>Points</th><th></th></tr></thead>
       <tbody>${g.events.map(row).join('')}</tbody>
     </table></div>`,
-    g.id === state.currentYear)).join('');
+    g.id === state.currentYear);
+
+  const currentGroup = groups.find((g) => g.id === state.currentYear);
+  const otherGroups = groups.filter((g) => g !== currentGroup);
+  const otherCount = otherGroups.reduce((n, g) => n + g.events.length, 0);
+
+  root.innerHTML = `
+    ${currentGroup ? groupCard(currentGroup) : '<div class="card"><div class="empty">No current academic year selected.</div></div>'}
+    ${otherGroups.length === 0 ? '' : `
+    <div class="card" style="padding-top:14px">
+      <button class="ghost" id="ev-toggle-others">${state.eventsShowOthers
+        ? 'Hide other years'
+        : `Show other years &amp; out-of-range events (${otherCount})`}</button>
+    </div>`}
+    ${state.eventsShowOthers ? otherGroups.map(groupCard).join('') : ''}`;
 
   wireCollapsibles(root);
+
+  if (el('ev-toggle-others')) el('ev-toggle-others').onclick = () => {
+    state.eventsShowOthers = !state.eventsShowOthers;
+    show('events');
+  };
 
   root.querySelectorAll('[data-settype]').forEach((sel) => sel.onchange = () => guard(async () => {
     const code = sel.value || null;
@@ -1195,6 +1320,11 @@ async function renderStandings(root) {
         ${facet('f-major', 'major', 'All majors')}
         ${facet('f-gender', 'gender', 'All genders')}
         ${facet('f-class', 'class_level', 'All class levels')}
+        <select id="f-membership">
+          <option value="">Any membership</option>
+          <option value="member">This year's member</option>
+          <option value="missing">Missing this year's form</option>
+        </select>
         <label class="check"><input type="checkbox" id="f-noeboard"> exclude eboard &amp; chairs</label>
         <label class="check"><input type="checkbox" id="f-nobonus"> exclude role bonuses</label>
         <span class="spacer"></span>
@@ -1208,10 +1338,21 @@ async function renderStandings(root) {
   let view = [];
   function draw() {
     const major = el('f-major').value, gender = el('f-gender').value, cls = el('f-class').value;
+    const membership = el('f-membership').value;
     const noEboard = el('f-noeboard').checked, noBonus = el('f-nobonus').checked;
 
     view = totals
       .filter((t) => (!major || t.major === major) && (!gender || t.gender === gender) && (!cls || t.class_level === cls))
+      // "This year's member" is just is_current_member. "Missing this year's form" mirrors what
+      // the old Roster screen's queue meant: not a current member AND has SOME points in the
+      // range shown — otherwise every person who has simply never shown up would count as
+      // "missing", which is not an actionable list. That is also why f-membership's onchange
+      // (below) defaults the range to this year: is_current_member always reflects this year
+      // regardless of range, so pairing it with all-time points reproduces the inflated,
+      // unwindowed count the old Roster screen had.
+      .filter((t) => membership === 'member' ? t.is_current_member
+                    : membership === 'missing' ? !t.is_current_member && Number(t.total_points) > 0
+                    : true)
       .filter((t) => !noEboard || !eboard.has(t.netid))
       .map((t) => ({ ...t, shown: Number(t.total_points) - (noBonus ? Number(t.points_from_role) : 0) }))
       .sort((a, b) => b.shown - a.shown);
@@ -1221,7 +1362,7 @@ async function renderStandings(root) {
         <thead><tr>
           <th>#</th><th>Name</th><th>netID</th><th>Points</th>
           <th>Events</th><th>Role</th><th>Manual</th>
-          <th>Major</th><th>Gender</th><th>Class</th><th>Last active</th>
+          <th>Major</th><th>Gender</th><th>Class</th><th>Member</th><th>Last active</th>
         </tr></thead>
         <tbody>${view.map((t, i) => `
           <tr>
@@ -1235,6 +1376,7 @@ async function renderStandings(root) {
             <td>${t.major ? esc(t.major) : blank()}</td>
             <td>${t.gender ? esc(t.gender) : blank()}</td>
             <td>${t.class_level ? esc(t.class_level) : blank()}</td>
+            <td>${t.is_current_member ? 'Yes' : 'No'}</td>
             <td>${t.last_activity ? esc(t.last_activity) : blank('never')}</td>
           </tr>`).join('')}
         </tbody>
@@ -1244,7 +1386,11 @@ async function renderStandings(root) {
           ? `, counting points from ${range[0] ? esc(range[0]) : 'the beginning'} to ${range[1] ? esc(range[1]) : 'today'}.
              Role bonuses count for the whole academic year they were awarded in, so they appear in
              any range that overlaps that year.`
-          : '.'}</p>`;
+          : '.'}${
+        membership && !range[0] && !range[1]
+          ? ' <strong>Showing all-time points</strong> — Membership always reflects this year only, '
+            + 'so pick "This year" (or another range) above for a count that lines up with it.'
+          : ''}</p>`;
   }
 
   /**
@@ -1268,7 +1414,12 @@ async function renderStandings(root) {
 
   ['f-major', 'f-gender', 'f-class', 'f-noeboard', 'f-nobonus'].forEach((id) => el(id).onchange = draw);
 
+  // Whether the officer has already chosen a range themselves (any preset, or a custom date) —
+  // once true, the Membership facet stops nudging the range and just filters whatever is loaded.
+  let rangePicked = false;
+
   el('f-preset').onchange = () => guard(async () => {
+    rangePicked = true;
     const chosen = presets[el('f-preset').value];
     if (!chosen) return; // "Custom range…" — the officer drives the date boxes themselves
     const [from, to] = chosen.range;
@@ -1278,16 +1429,34 @@ async function renderStandings(root) {
   });
 
   ['f-from', 'f-to'].forEach((id) => el(id).onchange = () => guard(async () => {
+    rangePicked = true;
     el('f-preset').value = 'custom';
     await applyRange(el('f-from').value, el('f-to').value);
   }));
 
+  // Selecting a Membership value while still on the untouched default (all-time) range switches
+  // to "This year" first: is_current_member always reflects this year, and pairing it with
+  // all-time points is what made the old Roster screen's "missing" list count everyone with any
+  // historical points rather than the ~66 people who actually missed this year's form. Once the
+  // officer has picked a range of their own, this defers to that choice.
+  el('f-membership').onchange = () => guard(async () => {
+    const active = el('f-membership').value;
+    if (active && !rangePicked && currentYear && el('f-preset').value === 'all') {
+      el('f-preset').value = 'year';
+      el('f-from').value = currentYear.starts_on;
+      el('f-to').value = currentYear.ends_on;
+      await applyRange(currentYear.starts_on, currentYear.ends_on);
+    } else {
+      draw();
+    }
+  });
+
   el('f-csv').onclick = () => {
-    const rows = [['name', 'netid', 'points', 'events', 'role', 'manual', 'major', 'gender', 'class']]
+    const rows = [['name', 'netid', 'points', 'events', 'role', 'manual', 'major', 'gender', 'class', 'member']]
       .concat(view.map((t) => [
         [t.first_name, t.last_name].filter(Boolean).join(' '), t.netid, t.shown,
         t.points_from_events, t.points_from_role, t.points_from_adjustments,
-        t.major || '', t.gender || '', t.class_level || '',
+        t.major || '', t.gender || '', t.class_level || '', t.is_current_member ? 'yes' : 'no',
       ]));
     const csv = rows.map((r) => r.map((c) => /[",]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : c).join(',')).join('\n');
     const a = document.createElement('a');
@@ -1300,68 +1469,6 @@ async function renderStandings(root) {
     a.click();
   };
   draw();
-}
-
-// ---------------------------------------------------------------------------
-// Screen: Roster
-// ---------------------------------------------------------------------------
-async function renderRoster(root) {
-  // Three queries total, regardless of how many academic years exist: totals for the
-  // "missing a membership form" queue, years themselves, and every membership row with its
-  // person joined in. The per-year grouping below is done client-side against that one
-  // memberships fetch, the same batching pattern renderVolunteering() uses for its counts.
-  const [totals, years, memberships] = await Promise.all([
-    get('v_member_totals?select=netid,first_name,last_name,is_current_member,total_points&order=total_points.desc'),
-    get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc'),
-    get('memberships?select=year_id,netid,class_level,major,gender,people(first_name,last_name)&order=year_id'),
-  ]);
-  const missing = totals.filter((t) => !t.is_current_member && Number(t.total_points) > 0);
-
-  const byYear = new Map();
-  for (const m of memberships) {
-    const list = byYear.get(m.year_id) || [];
-    list.push(m);
-    byYear.set(m.year_id, list);
-  }
-
-  root.innerHTML = `
-    <div class="card">
-      <h2>Has points but no ${esc(state.currentYear)} membership form ${countTag(missing.length)}</h2>
-      ${missing.length === 0 ? '<div class="empty">Nobody.</div>' : `
-      <div class="scroll"><table>
-        <thead><tr><th>Name</th><th>netID</th><th>Points</th></tr></thead>
-        <tbody>${missing.map((t) => `
-          <tr>
-            <td>${esc([t.first_name, t.last_name].filter(Boolean).join(' ')) || blank('no name')}</td>
-            <td><code>${esc(t.netid)}</code></td>
-            <td class="num">${t.total_points}</td>
-          </tr>`).join('')}</tbody>
-      </table></div>`}
-    </div>
-
-    ${years.map((y) => {
-      const rows = byYear.get(y.id) || [];
-      // memberships is empty until Phase 3b ingests the membership form (docs/DESIGN.md), so
-      // every year renders zero rows today. That is a data gap, not a bug, hence the honest
-      // empty state below rather than hiding the section. The current year opens regardless of
-      // its count, since it is the one an officer is most likely checking.
-      return detailsCard(`roster-${y.id}`, rows.length, `${esc(y.id)} ${countTag(rows.length, false)}`,
-        rows.length === 0 ? `<div class="empty">No membership data for ${esc(y.id)} yet.</div>` : `
-        <div class="scroll"><table>
-          <thead><tr><th>Name</th><th>netID</th><th>Class</th><th>Major</th><th>Gender</th></tr></thead>
-          <tbody>${rows.map((m) => `
-            <tr>
-              <td>${esc([m.people?.first_name, m.people?.last_name].filter(Boolean).join(' ')) || blank('no name')}</td>
-              <td><code>${esc(m.netid)}</code></td>
-              <td>${m.class_level ? esc(m.class_level) : blank()}</td>
-              <td>${m.major ? esc(m.major) : blank()}</td>
-              <td>${m.gender ? esc(m.gender) : blank()}</td>
-            </tr>`).join('')}</tbody>
-        </table></div>`,
-        y.id === state.currentYear);
-    }).join('')}`;
-
-  wireCollapsibles(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,6 +1603,98 @@ async function renderAdjustments(root) {
     toast('Deleted.');
     show('adjustments');
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Screen: Officers — who can sign in to this dashboard at all.
+//
+// No migration behind this screen: `officers` already carries a blanket RLS policy
+// (officers_all) letting any signed-in officer insert/update/delete rows in it, so this is a
+// pure UI addition. Modeled directly on renderRoles' table+add-row pattern above.
+// ---------------------------------------------------------------------------
+async function renderOfficers(root) {
+  const officers = await get('officers?select=email,display_name,active&order=active.desc,email');
+
+  root.innerHTML = `
+    <div class="card">
+      <h2>Officers ${countTag(officers.filter((o) => o.active).length, false)}</h2>
+      <div class="row" style="margin-bottom:16px">
+        <input id="o-email" placeholder="email" size="26">
+        <input id="o-name" placeholder="Display name (optional)" size="22">
+        <button class="act" id="o-add">Add</button>
+      </div>
+      ${officers.length === 0 ? '<div class="empty">No officers on file.</div>' : `
+      <div class="scroll"><table>
+        <thead><tr><th>Email</th><th>Name</th><th></th></tr></thead>
+        <tbody>${officers.map((o) => `
+          <tr${o.active ? '' : ' class="dim"'}>
+            <td>${esc(o.email)}</td>
+            <td>${o.display_name ? esc(o.display_name) : blank()}</td>
+            <td class="row actions">
+              ${o.active ? '<span class="pill">active</span>' : '<span class="pill">inactive</span>'}
+              ${o.active
+                ? `<button class="ghost" data-remove="${esc(o.email)}">Remove</button>`
+                : `<button class="ghost" data-restore="${esc(o.email)}">Restore</button>`}
+            </td>
+          </tr>`).join('')}</tbody>
+      </table></div>`}
+    </div>`;
+
+  el('o-add').onclick = () => guard(async () => {
+    const email = el('o-email').value.trim().toLowerCase();
+    const name = el('o-name').value.trim();
+    if (!email) return toast('Enter an email.', true);
+    // merge-duplicates so re-adding a removed officer's email flips active back to true instead
+    // of erroring on the primary key.
+    await post('officers?on_conflict=email', [{ email, display_name: name || null, active: true }], 'resolution=merge-duplicates');
+    toast(`Added ${email}.`);
+    show('officers');
+  });
+
+  // Soft removal, matching the documented runbook step (docs/RUNBOOK.md) and how the rest of this
+  // codebase treats access changes: active=false keeps the row (and its history) rather than
+  // deleting it, and is shown dimmed rather than hidden, the same way a dismissed event is on the
+  // Events screen.
+  root.querySelectorAll('[data-remove]').forEach((b) => b.onclick = () => guard(async () => {
+    if (!confirm(`Remove ${b.dataset.remove}'s dashboard access?`)) return;
+    await patch(`officers?email=eq.${encodeURIComponent(b.dataset.remove)}`, { active: false });
+    toast('Removed.');
+    show('officers');
+  }));
+
+  root.querySelectorAll('[data-restore]').forEach((b) => b.onclick = () => guard(async () => {
+    await patch(`officers?email=eq.${encodeURIComponent(b.dataset.restore)}`, { active: true });
+    toast('Restored.');
+    show('officers');
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Screen: Audit Log — every officer action worth remembering, in one place.
+//
+// Reads `v_audit_log`, a view that unions a general audit_log table (unmatched-signins
+// attach/dismiss, name saves, officer changes, role/bonus changes) with the existing
+// event_changes and adjustments tables into one common shape. No filters, no collapsing — a flat,
+// reverse-chronological table, the same way Adjustments already is.
+// ---------------------------------------------------------------------------
+async function renderAuditLog(root) {
+  const rows = await get('v_audit_log?select=changed_at,changed_by,summary,table_name,record_id&order=changed_at.desc&limit=300');
+
+  root.innerHTML = `
+    <div class="card">
+      <h2>Audit log ${countTag(rows.length, false)}</h2>
+      ${rows.length === 0 ? '<div class="empty">Nothing recorded yet.</div>' : `
+      <div class="scroll"><table>
+        <thead><tr><th>Time</th><th>Actor</th><th>Summary</th><th>Table</th></tr></thead>
+        <tbody>${rows.map((r) => `
+          <tr>
+            <td>${esc(String(r.changed_at || '').replace('T', ' ').slice(0, 19))}</td>
+            <td>${r.changed_by ? esc(r.changed_by) : blank('unknown')}</td>
+            <td style="white-space:normal">${esc(r.summary)}</td>
+            <td><span class="pill">${esc(r.table_name)}</span></td>
+          </tr>`).join('')}</tbody>
+      </table></div>`}
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1648,7 +1847,7 @@ function wireYearDialog() {
 // ---------------------------------------------------------------------------
 const SCREENS = {
   attention: renderAttention, events: renderEvents, volunteering: renderVolunteering, standings: renderStandings,
-  roster: renderRoster, roles: renderRoles, adjustments: renderAdjustments,
+  roles: renderRoles, adjustments: renderAdjustments, officers: renderOfficers, audit: renderAuditLog,
 };
 
 async function show(tab) {
