@@ -264,12 +264,20 @@ Deno.serve(async (req) => {
         },
         { onConflict: 'form_id' },
       );
-    } else if (known?.last_error) {
-      // A previously unreadable form that now opens — clear the flag so it leaves the queue.
-      await db
-        .from('forms')
-        .update({ title: form.title || null, unreadable_since: null, last_error: null })
-        .eq('form_id', form.formId);
+    } else {
+      // Keep the event's name mirroring Drive's current title on every pass, not just at
+      // discovery. An officer routinely creates a form as "Untitled form", fills it in over the
+      // following days, and retitles it once — the dashboard's Event column must show whatever
+      // it's titled now, not what it was titled the moment the poller first saw it. Nothing else
+      // writes events.name, so there's no hand-typed value here to protect.
+      const titleFields: Record<string, unknown> = { title: form.title || null };
+      if (known?.last_error) {
+        // A previously unreadable form that now opens — clear the flag so it leaves the queue.
+        titleFields.unreadable_since = null;
+        titleFields.last_error = null;
+      }
+      await db.from('forms').update(titleFields).eq('form_id', form.formId);
+      await db.from('events').update({ name: form.title || 'Untitled form' }).eq('id', eventId);
     }
 
     // The event's current value. Null type means 0 points for now, restamped when tapped.
