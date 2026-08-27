@@ -535,6 +535,13 @@ function renderCandidates(out, found, onPick) {
 // re-query the directory on every mutation. A resolved row's entry just goes stale in memory
 // until reload — harmless at this scale.
 const directoryAutoSearchCache = new Map();
+// netIDs the directory has confirmed (this session) it has nothing for — from either the per-row
+// "Look up" or a bulk fill-names pass. Greys out a netid's "Look up" button so an officer isn't
+// tempted to re-click something that already came back empty. Session-scoped, not persisted:
+// directory listings can change (a student un-hiding theirs under FERPA), and a transient network
+// miss during fill-names lands in here too (see that mode's header) — a fresh page load, or just
+// running the bulk pass again, is the correct way to re-check, not a permanent flag in the DB.
+const noDirectoryMatch = new Set();
 // volunteerEventId lives here rather than in renderVolunteering so it survives the re-render
 // that follows Commit: the officer stays on the event they were entering and can add more.
 // open holds collapsible section state (see sectionOpen below), keyed by section id, for the
@@ -764,7 +771,9 @@ async function renderAttention(root) {
       </div>
       <div class="scroll"><table>
         <thead><tr><th>netID</th><th>Points</th><th>First</th><th>Last</th><th></th></tr></thead>
-        <tbody>${nameless.map((t) => `
+        <tbody>${nameless.map((t) => {
+          const noMatch = noDirectoryMatch.has(t.netid);
+          return `
           <tr>
             <td><code>${esc(t.netid)}</code></td>
             <td class="num">${t.total_points}</td>
@@ -773,11 +782,12 @@ async function renderAttention(root) {
             <td>
               <div class="row actions">
                 <button class="act" data-name="${esc(t.netid)}">Save</button>
-                <button class="ghost" data-namesearch="${esc(t.netid)}">Look up</button>
+                <button class="ghost" data-namesearch="${esc(t.netid)}"${noMatch ? ' disabled title="Already checked — the Rice directory has nothing for this netID."' : ''}>Look up</button>
               </div>
-              <div id="ncand-${esc(t.netid)}"></div>
+              <div id="ncand-${esc(t.netid)}">${noMatch ? '<span class="hint">No match. They may have hidden their directory listing — enter it by hand.</span>' : ''}</div>
             </td>
-          </tr>`).join('')}
+          </tr>`;
+        }).join('')}
         </tbody>
       </table></div>`)}`;
 
@@ -869,35 +879,48 @@ async function renderAttention(root) {
     show('attention');
   });
 
-  // Loops fill-names automatically until nothing is left, rather than making an officer press
-  // the button once per 25. Each call still only sends one batch of 25 to Rice — that per-call
-  // ceiling and its 150ms-per-lookup pacing (supabase/functions/_shared/directory.ts) are the
-  // real courtesy behaviour and stay unchanged; looping just removes the manual re-press.
+  // Loops fill-names automatically until every nameless person has been tried once, rather than
+  // making an officer press the button once per 25. Each call still only sends one batch of 25 to
+  // Rice — that per-call ceiling and its 150ms-per-lookup pacing
+  // (supabase/functions/_shared/directory.ts) are the real courtesy behaviour and stay unchanged;
+  // looping just removes the manual re-press.
   //
-  // Each round writes straight to `people` before the next one starts (see the edge function),
-  // so nothing is lost if an officer navigates away mid-run — the next visit here just picks up
-  // wherever `remaining` left off.
+  // The stopping condition is "tried everyone once", not "nothing left with no name" — those are
+  // NOT the same thing. Someone whose directory listing is hidden never gets a name, so they never
+  // leave the nameless pool; a loop that kept going `while (still somebody nameless)` would just
+  // re-fetch that same unfillable person forever (alphabetically first, so `order by netid limit
+  // 25` never gets past them) and hammer Rice's directory for no reason. `tried` is exactly the
+  // `excludeNetids` the edge function needs to serve a DIFFERENT 25 each round instead.
+  //
+  // Each round writes straight to `people` before the next one starts (see the edge function), so
+  // nothing is lost if an officer navigates away mid-run.
   if (el('lookup-names')) el('lookup-names').onclick = () => guard(async () => {
     const button = el('lookup-names');
     button.disabled = true;
     button.textContent = 'Looking up…';
 
+    const total = nameless.length;
+    const tried = new Set();
     let filled = 0, remaining = Infinity;
     try {
-      while (remaining > 0) {
-        const r = await withRetry(() => edgeFn('directory-lookup', { mode: 'fill-names', limit: 25 }));
-        filled += r.filled;
+      while (tried.size < total) {
+        const r = await withRetry(() => edgeFn('directory-lookup', {
+          mode: 'fill-names', limit: 25, excludeNetids: [...tried],
+        }));
         remaining = r.remaining;
         if (r.attempted === 0) break; // nothing left to read, whatever remaining last said
-        button.textContent = remaining > 0 ? `Filled ${filled} of ${filled + remaining}…` : `Filled ${filled}. Done.`;
+        r.attemptedNetids.forEach((id) => tried.add(id));
+        r.noMatchNetids.forEach((id) => noDirectoryMatch.add(id));
+        filled += r.filled;
+        button.textContent = tried.size < total ? `Looked up ${tried.size} of ${total}…` : `Looked up ${tried.size}. Done.`;
       }
       toast(remaining > 0
-        ? `Filled ${filled}. ${remaining} still have no directory match — they may have hidden their listing.`
-        : `Filled ${filled}. None left.`, remaining > 0);
+        ? `Looked up ${tried.size}, filled ${filled}. ${remaining} still have no directory match — they may have hidden their listing.`
+        : `Looked up ${tried.size}, filled ${filled}. None left.`, remaining > 0);
     } catch (e) {
       // A batch failed three times in a row (withRetry gave up). Report where the run stopped
       // rather than let guard()'s generic handler swallow the progress made so far.
-      toast(`Stopped after filling ${filled}: ${e.message.slice(0, 150)}`, true);
+      toast(`Stopped after looking up ${tried.size} (filled ${filled}): ${e.message.slice(0, 150)}`, true);
     }
     show('attention');
   });
@@ -919,6 +942,11 @@ async function renderAttention(root) {
     const out = el(`ncand-${netid}`);
     out.innerHTML = '<span class="hint">Searching…</span>';
     const found = await edgeFn('directory-lookup', { mode: 'search', q: netid });
+    if (!found.tooBroad && !found.results?.length) {
+      noDirectoryMatch.add(netid);
+      b.disabled = true;
+      b.title = 'Already checked — the Rice directory has nothing for this netID.';
+    }
     renderCandidates(out, found, (r) => {
       el(`fn-${netid}`).value = r.firstName || '';
       el(`ln-${netid}`).value = r.lastName || '';

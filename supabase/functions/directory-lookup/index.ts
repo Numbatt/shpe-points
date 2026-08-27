@@ -36,10 +36,14 @@
  *     a personal email instead of a netID. Writes nothing, ever — see searchDirectoryByName's
  *     header for why its results must always pass through a human.
  *
- *   { mode: 'fill-names', limit: 25 }
+ *   { mode: 'fill-names', limit: 25, excludeNetids: ['ab12'] }
  *     Finds people with no name on record, looks each up by netID, and fills in what it finds.
  *     This is scripts/backfill-names.ts, moved to where the officer already is. It keeps that
  *     script's two load-bearing properties: bounded per call, and it can only ever fill a blank.
+ *     `excludeNetids` lets the dashboard loop this call across a whole pass without the query
+ *     re-serving the same unfillable people every round (see the comment at its read below).
+ *     The response's `noMatchNetids` is what lets the dashboard grey out a "Look up" button for
+ *     someone it already knows the directory has nothing for.
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
@@ -117,27 +121,55 @@ Deno.serve(async (req) => {
     const requested = Number(body?.limit ?? MAX_FILL);
     const limit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), MAX_FILL) : MAX_FILL;
 
+    // The dashboard loops this call to cover more than one batch of MAX_FILL. Without excluding
+    // what earlier rounds in the SAME loop already tried, `order by netid limit N` would just
+    // hand back the identical alphabetically-first rows every round: a netid the directory has no
+    // match for never gets a name, so it never leaves this query's result, and the loop would spin
+    // on it forever without ever reaching anyone who sorts after it. Sanitized to the netid shape
+    // used everywhere else (see normalizeNetid) before it goes anywhere near a filter string.
+    const excludeNetids = Array.isArray(body?.excludeNetids)
+      ? [...new Set((body.excludeNetids as unknown[])
+          .map((v) => String(v ?? '').trim().toLowerCase())
+          .filter((v) => /^[a-z0-9]{1,20}$/.test(v)))]
+      : [];
+
     // The write needs service_role: `people` is officer-writable under RLS, but doing the update
     // as the caller would make the guarded filter below depend on the caller's policy evaluation
     // rather than on the filter itself. Same reasoning as the SECURITY DEFINER functions.
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
-    const { data: nameless, error: readError } = await admin
+    let nameQuery = admin
       .from('people')
       .select('netid')
       .is('first_name', null)
       .is('last_name', null)
       .order('netid')
       .limit(limit);
+    if (excludeNetids.length > 0) nameQuery = nameQuery.not('netid', 'in', `(${excludeNetids.join(',')})`);
+    const { data: nameless, error: readError } = await nameQuery;
     if (readError) return json({ error: readError.message }, 500);
 
     const netids = (nameless ?? []).map((p: { netid: string }) => p.netid);
-    if (netids.length === 0) return json({ attempted: 0, filled: 0, remaining: 0 });
+    if (netids.length === 0) return json({ attempted: 0, filled: 0, remaining: 0, attemptedNetids: [], noMatchNetids: [] });
 
     const found = await lookupNetids(netids, { limit, delayMs: 150 });
 
+    // Walk every netid asked for, not just the ones found: the dashboard's per-row "Look up"
+    // button greys itself out for a netid once it knows the directory has nothing for it, and
+    // noMatchNetids is how the bulk pass reports that same fact for a whole batch at once.
+    // lookupNetids collapses "confirmed zero directory results" and "transient failure/timeout/
+    // ambiguous match" into the same "absent from the map" case (see its own header) -- there is
+    // no way to tell those apart here, and marking a transient miss the same as a confirmed one is
+    // no new risk: an officer re-running this pass already retries it exactly the way a fresh page
+    // load would.
     let filled = 0;
-    for (const [netid, name] of found) {
+    const noMatchNetids: string[] = [];
+    for (const netid of netids) {
+      const name = found.get(netid);
+      if (!name) {
+        noMatchNetids.push(netid);
+        continue;
+      }
       // The guard, carried over verbatim in spirit from scripts/backfill-names.ts: re-assert that
       // BOTH names are still null at write time. An officer may have typed a name into the
       // dashboard in the seconds since the read above, and a person who goes by a name the
@@ -151,6 +183,9 @@ Deno.serve(async (req) => {
         .is('last_name', null)
         .select('netid');
       if (!error && (updated?.length ?? 0) > 0) filled++;
+      // else: a human already typed a name in the seconds since the read above. That is not a
+      // directory failure, so it does not go in noMatchNetids -- the person just isn't nameless
+      // anymore.
     }
 
     // What's left overall, so the dashboard can say "66 still missing" honestly rather than
@@ -161,7 +196,7 @@ Deno.serve(async (req) => {
       .is('first_name', null)
       .is('last_name', null);
 
-    return json({ attempted: netids.length, filled, remaining: count ?? 0 });
+    return json({ attempted: netids.length, filled, remaining: count ?? 0, attemptedNetids: netids, noMatchNetids });
   }
 
   return json({ error: `unknown mode: ${mode}` }, 400);
