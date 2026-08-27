@@ -286,12 +286,22 @@
   .signin { max-width: 380px; margin: 18vh auto; text-align: center; padding: 0 24px; }
   .signin .logo { width: 180px; height: auto; margin: 0 auto 26px; display: block; }
   .signin p { color: var(--muted); font-size: 14px; margin: 0 0 22px; }
+
+  /* A pointer to the source/docs for whoever inherits this next, tucked out of the way of
+     everything an officer actually does here. Faint until hovered, never navy: this is not a
+     control anyone needs to reach for during normal use. */
+  #repo-link {
+    position: fixed; right: 14px; bottom: 10px; font-size: 12px; color: var(--faint);
+    text-decoration: none; z-index: 1;
+  }
+  #repo-link:hover { color: var(--muted); text-decoration: underline; }
 </style>
 </head>
 <body>
 
 <div id="app"></div>
 <div id="toast"></div>
+<a id="repo-link" href="https://github.com/Numbatt/shpe-points" target="_blank" rel="noopener">Source &amp; docs</a>
 
 <!--
   Native <dialog>: Escape to close, focus trapping and the backdrop are all browser behaviour.
