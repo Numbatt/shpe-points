@@ -180,14 +180,16 @@
   tr.dim a { color: inherit; }
 
   /* An action cell that must never wrap its buttons onto a second line, however cramped the
-     column beside it gets (e.g. the netID-lookup column, which holds two inputs and a button).
-     Reserving min-width means the squeeze lands on that neighbour, not here. */
+     column beside it gets (e.g. the netID-lookup column, which holds a netid input and a
+     disclosure). Reserving min-width means the squeeze lands on that neighbour, not here. */
   td.actions { white-space: nowrap; min-width: 168px; }
   td.actions.row { flex-wrap: nowrap; }
 
-  /* The "search a different spelling" box beside "Look up netID": prefilled with the detected
-     name so the button works with no typing, but the name is already shown one column over, so
-     the box itself stays behind a disclosure instead of showing that name a second time. */
+  /* The "search a different spelling" box: a manual override for when the automatic directory
+     search (run on the detected name, no click needed) misses because the form's spelling is
+     off. Prefilled with that same name so retrying is one keystroke away, but the name is
+     already shown one column over, so the box stays behind a disclosure rather than showing it
+     a second time. */
   input.search-alt { font-size: 12px; color: var(--muted); padding: 4px 7px; width: 120px; }
   details.alt-search { margin-top: 4px; }
   details.alt-search > summary {
@@ -527,6 +529,12 @@ function renderCandidates(out, found, onPick) {
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
+// Directory results for unmatched sign-ins, keyed by String(unmatched_signins.id). The search
+// runs automatically per row rather than on a click, but attaching or dismissing any row
+// re-renders the whole screen (see show()), so without this cache every remaining row would
+// re-query the directory on every mutation. A resolved row's entry just goes stale in memory
+// until reload — harmless at this scale.
+const directoryAutoSearchCache = new Map();
 // volunteerEventId lives here rather than in renderVolunteering so it survives the re-render
 // that follows Commit: the officer stays on the event they were entering and can add more.
 // open holds collapsible section state (see sectionOpen below), keyed by section id, for the
@@ -718,15 +726,12 @@ async function renderAttention(root) {
               ${context ? `<div class="hint">${esc(context)}</div>` : ''}
             </td>
             <td>
-              <div class="row">
-                <input id="fix-${u.id}" size="12" placeholder="netid">
-                <button class="ghost" data-search="${u.id}">Look up netID</button>
-              </div>
+              <input id="fix-${u.id}" size="12" placeholder="netid">
+              <div id="cand-${u.id}"></div>
               <details class="alt-search">
                 <summary>search a different spelling</summary>
                 <input class="search-alt" id="q-${u.id}" placeholder="name to search" value="${esc(who)}">
               </details>
-              <div id="cand-${u.id}"></div>
             </td>
             <td class="row actions">
               <button class="act" data-resolve="${u.id}">Attach</button>
@@ -808,21 +813,40 @@ async function renderAttention(root) {
     show('attention');
   }));
 
-  // Search Rice's directory by name to find the netID behind a personal email. Results are
-  // CANDIDATES: clicking one only fills the netID box, so an officer still presses Attach. The
-  // directory cannot verify a name the way it can verify a netID, so a human makes every call.
-  root.querySelectorAll('[data-search]').forEach((b) => b.onclick = () => guard(async () => {
-    const id = b.dataset.search;
-    const q = el(`q-${id}`).value.trim();
-    const out = el(`cand-${id}`);
-    if (!q) return toast('Type a name to search for.', true);
-    out.innerHTML = '<span class="hint">Searching…</span>';
-    const found = await edgeFn('directory-lookup', { mode: 'search', q });
-    renderCandidates(out, found, (r) => {
+  // Search Rice's directory by the name the sign-in form captured, automatically — no click,
+  // since the name is already sitting right there in "Who signed in". Results are CANDIDATES:
+  // clicking one only fills the netID box, so an officer still presses Attach. The directory
+  // cannot verify a name the way it can verify a netID, so a human makes every call.
+  const showDirectoryResults = (id, found) => {
+    directoryAutoSearchCache.set(id, found);
+    renderCandidates(el(`cand-${id}`), found, (r) => {
       el(`fix-${id}`).value = r.netid;
       toast(`Filled ${r.netid}. Check it, then press Attach.`);
     });
-  }));
+  };
+  unmatched.forEach((u) => {
+    const id = String(u.id);
+    const out = el(`cand-${id}`);
+    const who = payloadName(u.raw_payload);
+    if (!who) { out.innerHTML = '<span class="hint">No name to search — try "search a different spelling".</span>'; return; }
+    const cached = directoryAutoSearchCache.get(id);
+    if (cached) return showDirectoryResults(id, cached);
+    out.innerHTML = '<span class="hint">Searching…</span>';
+    edgeFn('directory-lookup', { mode: 'search', q: who }).then((found) => showDirectoryResults(id, found));
+  });
+
+  // Manual override for when the form's spelling doesn't match the directory: Enter re-runs the
+  // search with whatever is typed here and replaces the cached (automatic) result for this row.
+  root.querySelectorAll('.search-alt').forEach((input) => input.onkeydown = (e) => {
+    if (e.key !== 'Enter') return;
+    guard(async () => {
+      const id = input.id.replace(/^q-/, '');
+      const q = input.value.trim();
+      if (!q) return toast('Type a name to search for.', true);
+      el(`cand-${id}`).innerHTML = '<span class="hint">Searching…</span>';
+      showDirectoryResults(id, await edgeFn('directory-lookup', { mode: 'search', q }));
+    });
+  });
 
   // Dismiss a sign-in nobody can attach — a personal email with no Rice identity behind it, or a
   // test submission. Soft on purpose: resolved_at marks it handled while resolved_netid stays
