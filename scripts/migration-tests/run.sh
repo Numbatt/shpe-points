@@ -95,6 +95,12 @@ psql_run dedupe -f /tmp/tests/dedupe-assert.sql | tail -40
 psql_run dedupe -t -c "select count(*) from _t where not ok" | grep -q '^ *0$' || fail=1
 
 echo
+echo "==> behaviour: general officer audit log"
+build_db audit
+psql_run audit -f /tmp/tests/audit-log.sql | tail -60
+psql_run audit -t -c "select count(*) from _t where not ok" | grep -q '^ *0$' || fail=1
+
+echo
 echo "==> behaviour: the collects_membership backfill"
 DUAL=20260826120000_dual_role_events.sql
 
