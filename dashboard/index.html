@@ -113,6 +113,13 @@
 
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .row .spacer { flex: 1; }
+  /* A <td class="row"> (an actions cell whose buttons need flex layout) stops being a table-cell
+     box the moment display:flex applies, so it no longer takes part in the row's default
+     vertical-centering the way a plain <td> does. Invisible on a normal row, since every cell is
+     one line tall anyway — but a row whose Event cell wraps to two lines (the "membership form"
+     badge does this) makes the row taller, and only the flexed cell fails to re-center in it.
+     Forcing vertical-align here matches every other <td> in the same row again. */
+  td.row { vertical-align: middle; }
 
   /* ---- controls -------------------------------------------------------- */
   button.act {
