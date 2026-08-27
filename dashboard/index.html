@@ -185,9 +185,17 @@
   td.actions { white-space: nowrap; min-width: 168px; }
   td.actions.row { flex-wrap: nowrap; }
 
-  /* The "search a different spelling" box beside "Look up netID": secondary to the name already
-     shown one column over, so it reads smaller and muted rather than repeating it at full size. */
+  /* The "search a different spelling" box beside "Look up netID": prefilled with the detected
+     name so the button works with no typing, but the name is already shown one column over, so
+     the box itself stays behind a disclosure instead of showing that name a second time. */
   input.search-alt { font-size: 12px; color: var(--muted); padding: 4px 7px; width: 120px; }
+  details.alt-search { margin-top: 4px; }
+  details.alt-search > summary {
+    cursor: pointer; list-style: none; color: var(--muted); font-size: 12px;
+  }
+  details.alt-search > summary::-webkit-details-marker { display: none; }
+  details.alt-search > summary::marker { content: ''; }
+  details.alt-search[open] > summary { margin-bottom: 4px; }
 
   /* Directory-lookup candidates, shared by the unmatched-signins search and the per-row "No name
      on file" lookup. A compact bordered chip per candidate, stacked, rather than a loose block —
@@ -714,10 +722,10 @@ async function renderAttention(root) {
                 <input id="fix-${u.id}" size="12" placeholder="netid">
                 <button class="ghost" data-search="${u.id}">Look up netID</button>
               </div>
-              <!-- The name is already shown under "Who signed in" one column over, so this stays
-                   small and muted: a secondary "search a different spelling" box, not a second
-                   display of the same name. -->
-              <input class="search-alt" id="q-${u.id}" placeholder="or search a different spelling" value="${esc(who)}">
+              <details class="alt-search">
+                <summary>search a different spelling</summary>
+                <input class="search-alt" id="q-${u.id}" placeholder="name to search" value="${esc(who)}">
+              </details>
               <div id="cand-${u.id}"></div>
             </td>
             <td class="row actions">

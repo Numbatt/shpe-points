@@ -15,3 +15,5 @@ scripts/legacy-export/*.csv
 # Supabase CLI local state. Records which project this checkout is linked to,
 # which is per-machine and not the same thing as the project ref in .mcp.json.
 supabase/.temp/
+.vercel
+.env*
