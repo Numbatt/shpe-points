@@ -318,6 +318,17 @@
   </div>
 </dialog>
 
+<!-- A styled stand-in for window.confirm(), reused by confirmDialog() below. Same native <dialog>
+     reasoning as year-dialog: Escape-to-cancel, focus trapping and the backdrop come free. -->
+<dialog id="confirm-dialog">
+  <h2>Are you sure?</h2>
+  <div class="body"><p id="confirm-body" style="margin:0"></p></div>
+  <div class="foot">
+    <button class="ghost" id="confirm-cancel">Cancel</button>
+    <button class="act" id="confirm-ok">Confirm</button>
+  </div>
+</dialog>
+
 <script>
 // ---------------------------------------------------------------------------
 // Configuration — the only two values to change if the project ever moves.
@@ -467,6 +478,25 @@ const confirmMembershipType = () => confirm(
   + '\u2022 it stops paying attendance points, and everything already recorded against it is '
   + 'cleared and re-read from the form\n\n'
   + 'Attendance added by hand will be lost. Continue?');
+
+/**
+ * A styled replacement for window.confirm(), which renders as an unstyleable OS dialog that
+ * looks nothing like the rest of the dashboard. Backed by the #confirm-dialog <dialog> element
+ * (native, so Escape and the backdrop already cancel for free); resolves true on Confirm, false
+ * on Cancel/Escape/backdrop click.
+ */
+function confirmDialog(message) {
+  return new Promise((resolve) => {
+    const d = el('confirm-dialog');
+    el('confirm-body').textContent = message;
+    let settled = false;
+    const finish = (ok) => { if (settled) return; settled = true; d.close(); resolve(ok); };
+    el('confirm-ok').onclick = () => finish(true);
+    el('confirm-cancel').onclick = () => finish(false);
+    d.onclose = () => finish(false);
+    d.showModal();
+  });
+}
 
 let toastTimer;
 function toast(msg, isError) {
@@ -944,8 +974,7 @@ async function renderAttention(root) {
   // the queue. Un-dismissing is `update people set name_lookup_dismissed_at = null` by hand.
   root.querySelectorAll('[data-namedismiss]').forEach((b) => b.onclick = () => guard(async () => {
     const netid = b.dataset.namedismiss;
-    if (!confirm(`Dismiss ${netid} from "No name on file"? Their points are untouched -- this just `
-               + 'stops asking to look up their name.')) return;
+    if (!(await confirmDialog('Are you sure you want to do this?'))) return;
     await patch(`people?netid=eq.${encodeURIComponent(netid)}`, { name_lookup_dismissed_at: new Date().toISOString() });
     toast(`Dismissed ${netid}.`);
     show('attention');
