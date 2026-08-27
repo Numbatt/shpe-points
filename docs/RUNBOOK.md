@@ -262,11 +262,14 @@ name by hand, that correction wins permanently.
 
 ## Adding next year's officers
 
-**Adding someone is one step:** add their Google address to the `officers` table with
-`active = true`. That's it. They press "Sign in with Google" and they're in.
+**Adding someone is one step:** open the **Officers** tab, type their Google address (and
+optionally a display name), press **Add**. That's it. They press "Sign in with Google" and
+they're in.
 
-**Removing someone is one step:** set `active = false`. Access is revoked immediately and
-completely — there is no second place to clean up.
+**Removing someone is one step:** press **Remove** next to their row. Access is revoked
+immediately and completely — there is no second place to clean up. It's soft, not a delete: a
+removed officer still shows up (dimmed) with a **Restore** button, in case you remove the wrong
+person.
 
 Anyone signing in with an address that isn't on the list gets a clear "not recognised as an
 officer" message and sees no data at all. Signing in grants nothing by itself; the allowlist is
@@ -307,38 +310,47 @@ list is the difference between a system that survives and one that dies quietly.
 
 ## What's already working
 
-As of 25 August 2026:
+As of 27 August 2026:
 
 - The whole pipeline runs. Forms in the watched Drive folder are found automatically, responses
   become attendance, and tapping a type pays points to everyone already recorded.
-- **331 people, 1245 attendance records, 42 events** on record, from August 2024 to April 2026.
+- **334 people, 1,177 attendance records, 42 events** on record, spanning August 2024 to the
+  current 2026-27 year, all typed — nothing is sitting at 0 points for lack of a tap.
+- **73 membership records on file.** The demographic questions (major, gender, class level) have
+  been read for everyone who filled out a membership-designated form, so the Standings filters
+  aren't empty.
+- **No unmatched sign-ins waiting.** Every sign-in the poller has seen is attached to a real
+  person.
 - The public leaderboard on shpe.rice.edu keeps working and shows only names and totals. NetIDs
   used to be readable by anyone on the internet; they aren't any more.
 - Only people on the officer list can see or change anything. Someone signing in with a Google
   account that isn't on the list sees nothing at all — this was tested, not assumed.
+- **Adding and removing officers is a dashboard button**, not a SQL statement (see "Adding next
+  year's officers" above).
 
 ## What's still unfinished
 
 Written honestly, so you know what you're inheriting:
 
-- **14 events have no type yet**, so every GBM since August 2025 currently shows 0 points. Tapping
-  the type fixes each one instantly and pays everybody retroactively. **One warning before you go
-  down that list:** never tap **Membership** on an event unless it really is a standalone
-  membership drive. That button clears the event's attendance, re-reads the form from scratch, and
-  claims the whole year's membership slot, so the right form is blocked until you clear it. The
-  dashboard asks you to confirm for exactly that reason. If the form is a sign-in that *also* asks
-  for major and class year, do not tap Membership — use the card in Needs attention instead, which
-  keeps everybody's points.
-- **No membership form has ever been read**, so nobody has a major, gender or class level on file
-  and the Standings filters are empty. For 2025-26 the form is `Fall GBM 1 - 08/28/25` — it was
-  both the sign-in and the membership form. Designating it in Needs attention fills in everyone's
-  demographics within about fifteen minutes and leaves all 75 attendance rows paying their point.
-- **91 people have no name.** Open **Needs attention → No name on file** and press
-  **Look up 25 names in the Rice directory**. It fills blanks only and never changes a name
-  somebody typed. Students who hid their directory listing stay blank and need typing in by hand.
-- **3 unmatched sign-ins** are waiting. All three can be resolved — use **Find netID** to search
-  the directory by the name they typed on the form.
+- **40 people have no name on record, 30 of which have already been dismissed** as not worth
+  chasing further (almost always someone whose Rice directory listing is gone — a lapsed account
+  or a hidden FERPA listing — which never resolves automatically). That leaves **about 10** genuinely
+  worth another look: open **Needs attention → No name on file** and press **Look up names in the
+  Rice directory**. It fills blanks only and never changes a name somebody typed; a netID the
+  directory has nothing for greys out its own "Look up" button so you don't waste a click retrying
+  it, and there's a **Dismiss** button per row for anyone you decide isn't worth chasing.
 - **The public leaderboard shows all-time points**, including 2024-25. If the chapter wants it to
-  reset each year, that is one setting, and somebody has to decide.
-- **Adding officers still needs SQL.** Everything else about running the year is a button, but the
-  allowlist isn't. Ask whoever maintains the database.
+  reset each year, that is one setting (`app_config.leaderboard_window_start`), and somebody has to
+  decide when "the year" starts for that purpose.
+- **The Supabase project's ownership is worth double-checking** before you fully hand this off —
+  see the ownership checklist in `docs/DESIGN.md`. This is the single biggest risk to the system
+  surviving past this eboard: Apps Script triggers, the Vercel deploy, and the Supabase project all
+  stop working silently if the account that owns them is deprovisioned.
+- **Confirm the 2026-27 officer allowlist is complete.** A few officers are already added; make
+  sure the rest of this year's eboard is on the **Officers** tab before the semester gets busy.
+
+One warning worth keeping even though the backlog above is clear: **never tap Membership on an
+event unless it really is a standalone membership drive.** That button clears the event's
+attendance, re-reads the form from scratch, and claims the whole year's membership slot, so the
+right form is blocked until you clear it. If a form is a sign-in that *also* asks for major and
+class year, use the card in Needs attention instead — it keeps everybody's points.

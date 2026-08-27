@@ -2,11 +2,27 @@
 
 > ## Current status — read this first
 >
-> *Last updated: 2026-08-25.*
+> *Last updated: 2026-08-27.*
 >
 > **The system is live end to end.** The poller runs under the shared Gmail, the Edge Function
-> ingests, points flow, and the dashboard is deployed. The live database holds 331 people, 1245
-> attendance rows and 42 events spanning 2024-08-28 to 2026-04-16.
+> ingests, points flow, and the dashboard is deployed. The live database holds 334 people, 1,177
+> attendance rows and 42 events spanning 2024-08-28 to the current 2026-27 year — every event is
+> typed, no unmatched sign-ins are waiting, and 73 membership records are on file.
+>
+> ### What changed on 2026-08-27
+>
+> - **Two migrations that had been sitting committed but never actually applied to production**
+>   — `dedupe_unmatched_signins` and `officer_audit_log` — are live now. Both existed in git for
+>   two days with nobody noticing that a `git push` alone never runs SQL against Supabase: this
+>   project's migrations only take effect once someone pastes them into the SQL editor (or an
+>   agent with MCP access runs them), and that step had simply been skipped for these two.
+> - **A "No name on file" person can now be dismissed** (`people.name_lookup_dismissed_at`) once an
+>   officer decides a netID's directory listing is gone for good and isn't worth chasing further.
+>   Soft, like every other dismiss in this system — points are untouched, and un-dismissing is a
+>   plain SQL update.
+> - **The bulk directory-lookup pass no longer risks looping forever** on a person the directory
+>   will never resolve — it used to be able to re-query the same unfillable netID indefinitely
+>   instead of reaching everyone else in the queue.
 >
 > ### What changed on 2026-08-25
 >
