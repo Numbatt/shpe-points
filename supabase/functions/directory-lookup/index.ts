@@ -138,11 +138,17 @@ Deno.serve(async (req) => {
     // rather than on the filter itself. Same reasoning as the SECURITY DEFINER functions.
     const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
+    // name_lookup_dismissed_at is the dashboard's per-person "stop asking" flag (a senior whose
+    // directory listing is gone for good, most often). Matching the dashboard's own nameless query
+    // exactly matters here: without it, a dismissed person still occupies a batch slot in this
+    // query while never counting toward the dashboard's `total`, which would desync the two and
+    // either end the loop early or strand it short of everyone it should still try.
     let nameQuery = admin
       .from('people')
       .select('netid')
       .is('first_name', null)
       .is('last_name', null)
+      .is('name_lookup_dismissed_at', null)
       .order('netid')
       .limit(limit);
     if (excludeNetids.length > 0) nameQuery = nameQuery.not('netid', 'in', `(${excludeNetids.join(',')})`);
@@ -189,12 +195,14 @@ Deno.serve(async (req) => {
     }
 
     // What's left overall, so the dashboard can say "66 still missing" honestly rather than
-    // implying the queue is empty.
+    // implying the queue is empty. Excludes dismissed people for the same reason the read above
+    // does: a dismissed person isn't "still missing" from the officer's point of view anymore.
     const { count } = await admin
       .from('people')
       .select('netid', { count: 'exact', head: true })
       .is('first_name', null)
-      .is('last_name', null);
+      .is('last_name', null)
+      .is('name_lookup_dismissed_at', null);
 
     return json({ attempted: netids.length, filled, remaining: count ?? 0, attemptedNetids: netids, noMatchNetids });
   }

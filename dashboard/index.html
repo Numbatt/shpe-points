@@ -613,7 +613,10 @@ async function renderAttention(root) {
     // That is the material an officer needs to work out who a stray personal email belongs to.
     get('unmatched_signins?resolved_at=is.null&select=id,raw_identifier,raw_payload,event_id,events(name,occurred_on,forms(form_id))&order=id.desc'),
     get('forms?unreadable_since=not.is.null&select=form_id,title,last_error,unreadable_since'),
-    get('v_member_totals?select=netid,first_name,last_name,total_points&order=total_points.desc'),
+    // name_lookup_dismissed_at=is.null: a person an officer has already given up on chasing a
+    // name for (see the "No name on file" Dismiss button) never had first_name/last_name filled
+    // in, so filtering purely on those two would leave them stuck in this queue forever.
+    get('v_member_totals?select=netid,first_name,last_name,total_points&name_lookup_dismissed_at=is.null&order=total_points.desc'),
     get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc'),
     // Every event that is a membership form, all years. Tiny by construction -- at most one row
     // per academic year, enforced by events_membership_guard.
@@ -783,6 +786,7 @@ async function renderAttention(root) {
               <div class="row actions">
                 <button class="act" data-name="${esc(t.netid)}">Save</button>
                 <button class="ghost" data-namesearch="${esc(t.netid)}"${noMatch ? ' disabled title="Already checked — the Rice directory has nothing for this netID."' : ''}>Look up</button>
+                <button class="ghost" data-namedismiss="${esc(t.netid)}">Dismiss</button>
               </div>
               <div id="ncand-${esc(t.netid)}">${noMatch ? '<span class="hint">No match. They may have hidden their directory listing — enter it by hand.</span>' : ''}</div>
             </td>
@@ -931,6 +935,19 @@ async function renderAttention(root) {
     if (!first && !last) return toast('Enter at least one name.', true);
     await patch(`people?netid=eq.${encodeURIComponent(netid)}`, { first_name: first || null, last_name: last || null });
     toast(`Saved ${netid}.`);
+    show('attention');
+  }));
+
+  // For someone worth giving up on -- most often a senior whose directory listing is gone for
+  // good, so no amount of looking up will ever fill this in. Soft, like every other Dismiss in
+  // this dashboard: nothing about the person or their points changes, this only drops them out of
+  // the queue. Un-dismissing is `update people set name_lookup_dismissed_at = null` by hand.
+  root.querySelectorAll('[data-namedismiss]').forEach((b) => b.onclick = () => guard(async () => {
+    const netid = b.dataset.namedismiss;
+    if (!confirm(`Dismiss ${netid} from "No name on file"? Their points are untouched -- this just `
+               + 'stops asking to look up their name.')) return;
+    await patch(`people?netid=eq.${encodeURIComponent(netid)}`, { name_lookup_dismissed_at: new Date().toISOString() });
+    toast(`Dismissed ${netid}.`);
     show('attention');
   }));
 
