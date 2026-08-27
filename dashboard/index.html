@@ -1071,9 +1071,11 @@ async function renderEvents(root) {
         </td>
         <td class="num">${t.people}</td>
         <td class="num">${Math.round(t.points * 100) / 100}</td>
-        <td class="row">
-          ${e.collects_membership ? `<button class="ghost" data-clearmf="${esc(e.id)}">Clear</button>` : ''}
-          ${dismissed ? `<button class="ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
+        <td>
+          <div class="row">
+            ${e.collects_membership ? `<button class="ghost" data-clearmf="${esc(e.id)}">Clear</button>` : ''}
+            ${dismissed ? `<button class="ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
+          </div>
         </td>
       </tr>`;
   };
