@@ -431,6 +431,18 @@ async function api(path, init = {}) {
   return body ? JSON.parse(body) : null;
 }
 const get = (p) => api(p);
+// PostgREST silently caps an unranged response at this project's configured Max Rows (1000, live)
+// — no error, no warning, just a truncated array. Fine for anything scoped by a filter, but a bulk
+// table pull (Events screen's full attendance ledger) needs every row or per-event counts undercount
+// with no indication anything was cut. Loops on Range until a page comes back short.
+async function getAll(path, pageSize = 1000) {
+  let rows = [];
+  for (let from = 0; ; from += pageSize) {
+    const page = await api(path, { headers: { Range: `${from}-${from + pageSize - 1}` } });
+    rows = rows.concat(page);
+    if (page.length < pageSize) return rows;
+  }
+}
 const post = (p, body, prefer) => api(p, { method: 'POST', headers: prefer ? { Prefer: prefer } : {}, body: JSON.stringify(body) });
 const patch = (p, body) => api(p, { method: 'PATCH', body: JSON.stringify(body) });
 const del = (p) => api(p, { method: 'DELETE' });
@@ -1056,7 +1068,7 @@ async function renderEvents(root) {
     // get longer every year until it hits a URL limit; the whole ledger is a few thousand narrow
     // rows and is what Standings already pulls. Tallied client-side below. The people(...) embed
     // rides along on the same request so the per-event roster expand has no separate round trip.
-    get('attendance?select=event_id,netid,points_awarded,people(first_name,last_name)'),
+    getAll('attendance?select=event_id,netid,points_awarded,people(first_name,last_name)'),
     // Separate from state.eventTypes (boot-time, label + is_membership_form only): this screen's
     // type-values editor also needs default_points and is_variable_points, which nothing else in
     // the dashboard reads today, so there's no reason to widen the global boot query for it.
