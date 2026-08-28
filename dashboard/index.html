@@ -466,6 +466,21 @@ const countTag = (n, due = n > 0) => `<span class="count${due ? ' due' : ''}">${
 /** Empty cell. A dash reads as data; muted text reads as absence. */
 const blank = (label = 'not set') => `<span class="none">${label}</span>`;
 
+// Every timestamp Postgres/PostgREST hands back is UTC. Every officer reading this dashboard is in
+// Houston. Rendering the raw ISO string (the old behavior — see git blame on this file) silently
+// mislabels a UTC clock as if it were local, which is wrong by 5-6 hours depending on DST. This
+// formats in America/Chicago explicitly and appends the zone Intl resolves (CDT or CST, whichever
+// is actually in effect that day) so the value is self-labeled instead of ambiguous.
+const fmtCT = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  const time = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(d);
+  const tz = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', timeZoneName: 'short' })
+    .formatToParts(d).find((p) => p.type === 'timeZoneName')?.value || '';
+  return `${date} ${time} ${tz}`;
+};
+
 // An event's name, linked to its Google Form when we know which form produced it. Same URL shape
 // and same /edit target as the unreadable-forms card, so the two behave identically. Manual events
 // (volunteering, anything typed in by hand) have no form and stay plain text.
@@ -598,7 +613,7 @@ const noDirectoryMatch = new Set();
 // re-render a mutation on the Events screen triggers, not reset every time.
 const state = {
   eventTypes: [], currentYear: null, tab: 'attention', volunteerEventId: null, open: {},
-  eventsShowOthers: false,
+  eventsShowOthers: false, eventsExpanded: new Set(),
 };
 
 const TABS = [
@@ -731,7 +746,10 @@ async function renderAttention(root) {
     return [pick('year', 'class level', 'class'), pick('college'), pick('major')].filter(Boolean).join(' · ');
   };
 
+  // Volunteering excluded: it's created only from the dedicated Volunteering tab, never tapped
+  // here — see the comment on state.eventTypes in boot() for why.
   const typeButtons = (id) => state.eventTypes
+    .filter((t) => t.code !== 'volunteer')
     .map((t) => `<button class="ghost" data-type="${esc(t.code)}" data-event="${esc(id)}"${t.is_membership_form ? ' data-membership' : ''}>${esc(t.label)}</button>`)
     .join(' ');
 
@@ -806,7 +824,7 @@ async function renderAttention(root) {
         <tbody>${unreadable.map((f) => `
           <tr>
             <td><a href="https://docs.google.com/forms/d/${esc(f.form_id)}/edit" target="_blank" rel="noopener">${esc(f.title || f.form_id.slice(0, 14))}</a></td>
-            <td>${esc((f.unreadable_since || '').slice(0, 10))}</td>
+            <td>${esc(fmtCT(f.unreadable_since).slice(0, 10))}</td>
             <td style="white-space:normal">${esc(f.last_error || '')}</td>
           </tr>`).join('')}
         </tbody>
@@ -1031,21 +1049,33 @@ async function renderAttention(root) {
 // Browse-first: the only things that mutate here are the ones with nowhere else to live.
 // ---------------------------------------------------------------------------
 async function renderEvents(root) {
-  const [years, events, logged] = await Promise.all([
+  const [years, events, logged, types] = await Promise.all([
     get('academic_years?select=id,starts_on,ends_on&order=starts_on.desc'),
     get('events?select=id,name,occurred_on,type_code,points,source,ignored_at,ignored_by,collects_membership,forms(form_id)&order=occurred_on.desc'),
     // Every count on this screen in one query. An `in.(...)` list of event ids would work today and
     // get longer every year until it hits a URL limit; the whole ledger is a few thousand narrow
-    // rows and is what Standings already pulls. Tallied client-side below.
-    get('attendance?select=event_id,points_awarded'),
+    // rows and is what Standings already pulls. Tallied client-side below. The people(...) embed
+    // rides along on the same request so the per-event roster expand has no separate round trip.
+    get('attendance?select=event_id,netid,points_awarded,people(first_name,last_name)'),
+    // Separate from state.eventTypes (boot-time, label + is_membership_form only): this screen's
+    // type-values editor also needs default_points and is_variable_points, which nothing else in
+    // the dashboard reads today, so there's no reason to widen the global boot query for it.
+    get('event_types?select=code,label,default_points,is_variable_points&order=label'),
   ]);
 
   const tally = new Map();
+  const roster = new Map(); // event_id -> [{netid, name, points}]
   for (const a of logged) {
     const t = tally.get(String(a.event_id)) || { people: 0, points: 0 };
     t.people += 1;
     t.points += Number(a.points_awarded) || 0;
     tally.set(String(a.event_id), t);
+
+    const key = String(a.event_id);
+    const list = roster.get(key) || [];
+    const name = [a.people?.first_name, a.people?.last_name].filter(Boolean).join(' ');
+    list.push({ netid: a.netid, name, points: Number(a.points_awarded) || 0 });
+    roster.set(key, list);
   }
 
   const typeLabel = (code) => state.eventTypes.find((t) => t.code === code)?.label;
@@ -1064,8 +1094,11 @@ async function renderEvents(root) {
   const row = (e) => {
     const t = tally.get(String(e.id)) || { people: 0, points: 0 };
     const dismissed = !!e.ignored_at;
+    const key = String(e.id);
+    const expanded = state.eventsExpanded.has(key);
+    const people = roster.get(key) || [];
     return `
-      <tr${dismissed ? ' class="dim"' : ''}>
+      <tr data-expand="${esc(e.id)}" style="cursor:pointer"${dismissed ? ' class="dim"' : ''}>
         <td>${esc(e.occurred_on)}</td>
         <td>
           ${eventLink(e.name, e.forms?.[0]?.form_id)}
@@ -1074,18 +1107,34 @@ async function renderEvents(root) {
           ${dismissed ? '<span class="pill">not an event</span>' : ''}
         </td>
         <td>
-          <select data-settype="${esc(e.id)}"${dismissed ? ' disabled' : ''}>
+          <select data-settype="${esc(e.id)}"${dismissed || e.type_code === 'volunteer' ? ' disabled' : ''}>
             <option value=""${e.type_code ? '' : ' selected'}>&mdash; none &mdash;</option>
-            ${state.eventTypes.map((ty) => `<option value="${esc(ty.code)}"${ty.code === e.type_code ? ' selected' : ''}>${esc(ty.label)}</option>`).join('')}
+            ${state.eventTypes
+              // Volunteer stays out of the assignable list (see boot()'s comment) except on a row
+              // that already has it, where it's kept — disabled above — purely so the <select>
+              // displays the true type instead of falling through to "— none —" with nothing
+              // matching `selected`.
+              .filter((ty) => ty.code !== 'volunteer' || e.type_code === 'volunteer')
+              .map((ty) => `<option value="${esc(ty.code)}"${ty.code === e.type_code ? ' selected' : ''}>${esc(ty.label)}</option>`).join('')}
           </select>
         </td>
-        <td class="num">${t.people}</td>
+        <td class="num people-count">${t.people} ${expanded ? '&#9662;' : '&#9656;'}</td>
         <td class="num">${Math.round(t.points * 100) / 100}</td>
         <td>
           <div class="row">
             ${e.collects_membership ? `<button class="ghost" data-clearmf="${esc(e.id)}">Clear</button>` : ''}
             ${dismissed ? `<button class="ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
           </div>
+        </td>
+      </tr>
+      <tr class="detail-row"${expanded ? '' : ' hidden'}>
+        <td colspan="6">
+          <div class="scroll"><table>
+            <thead><tr><th>Name</th><th>netID</th><th>Points</th></tr></thead>
+            <tbody>${people.length ? people.map((p) => `
+              <tr><td>${p.name ? esc(p.name) : blank('no name on file')}</td><td><code>${esc(p.netid)}</code></td><td class="num">${Math.round(p.points * 100) / 100}</td></tr>
+            `).join('') : `<tr><td colspan="3" class="empty">No attendance recorded.</td></tr>`}</tbody>
+          </table></div>
         </td>
       </tr>`;
   };
@@ -1109,7 +1158,26 @@ async function renderEvents(root) {
   const otherGroups = groups.filter((g) => g !== currentGroup);
   const otherCount = otherGroups.reduce((n, g) => n + g.events.length, 0);
 
+  // Not "for {year}" like Roles' bonus card: event_types has no year_id column, so this is a
+  // global setting, not a per-year one, and the heading must not imply otherwise.
+  // Modeled directly on the Roles bonus card below (inline label+input row, no table): labels are
+  // fixed text here, never editable, so there is no `data-etlabel` counterpart to `bonus-${role}`.
+  const typeEditorCard = `
+    <div class="card">
+      <h2>Event types</h2>
+      <p class="hint">Changing a value only affects events typed after you save. Anything already
+        classified keeps the points it was recorded with.</p>
+      <div class="row">
+        ${types.map((t) => `
+          <label class="check" style="gap:8px">${esc(t.label)}
+            <input id="et-${esc(t.code)}" type="number" step="0.5" value="${t.default_points}" size="4" style="width:72px"${t.is_variable_points ? ' disabled' : ''}>
+          </label>`).join('')}
+        <button class="ghost" id="et-save">Save values</button>
+      </div>
+    </div>`;
+
   root.innerHTML = `
+    ${typeEditorCard}
     ${currentGroup ? groupCard(currentGroup) : '<div class="card"><div class="empty">No current academic year selected.</div></div>'}
     ${otherGroups.length === 0 ? '' : `
     <div class="card" style="padding-top:14px">
@@ -1125,6 +1193,34 @@ async function renderEvents(root) {
     state.eventsShowOthers = !state.eventsShowOthers;
     show('events');
   };
+
+  // Pure client-side toggle: `events` and `roster` are already fully loaded for this render, so
+  // expanding/collapsing a row needs no re-fetch. state.eventsExpanded is still consulted on every
+  // real re-render (settype/clearmf/restore/toggle-others), so an expanded row survives those.
+  // The whole row is the click target, not just the people cell — but the row also hosts the type
+  // <select>, the Clear/Restore buttons, and (when a form exists) a link to the Google Form editor,
+  // which must all keep their own click behavior instead of also toggling the row.
+  root.querySelectorAll('tr[data-expand]').forEach((tr) => tr.onclick = (ev) => {
+    if (ev.target.closest('select, button, a')) return;
+    const id = String(tr.dataset.expand);
+    const wasOpen = state.eventsExpanded.has(id);
+    wasOpen ? state.eventsExpanded.delete(id) : state.eventsExpanded.add(id);
+    const detailRow = tr.nextElementSibling;
+    detailRow.hidden = wasOpen;
+    const count = tally.get(id)?.people || 0;
+    tr.querySelector('.people-count').innerHTML = `${count} ${wasOpen ? '&#9656;' : '&#9662;'}`;
+  });
+
+  el('et-save').onclick = () => guard(async () => {
+    // Volunteer's input is disabled and has nothing to save (paid per hour, not from this table).
+    // No state.eventTypes refresh needed after this: it carries only label + is_membership_form
+    // (boot-time, see above), and label is no longer editable here.
+    await Promise.all(types
+      .filter((t) => !t.is_variable_points)
+      .map((t) => patch(`event_types?code=eq.${t.code}`, { default_points: Number(el(`et-${t.code}`).value) })));
+    toast('Event type values saved.');
+    show('events');
+  });
 
   root.querySelectorAll('[data-settype]').forEach((sel) => sel.onchange = () => guard(async () => {
     const code = sel.value || null;
@@ -1429,12 +1525,18 @@ async function renderStandings(root) {
     } : {}),
   };
 
+  // Default to "This year" whenever there is a current year to default to, so Standings opens
+  // already answering "who has the most points right now" instead of an all-time total that
+  // blends in graduated members and prior officers. Falls back to "All time" only on a fresh
+  // database with no academic year yet, where there is no "this year" to default to.
+  const defaultPreset = currentYear ? 'year' : 'all';
+
   root.innerHTML = `
     <div class="card">
       <h2>Standings</h2>
       <div class="row" style="margin-bottom:12px">
         <select id="f-preset">${Object.entries(presets)
-          .map(([k, p]) => `<option value="${k}">${esc(p.label)}</option>`).join('')}
+          .map(([k, p]) => `<option value="${k}"${k === defaultPreset ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
           <option value="custom">Custom range…</option>
         </select>
         <label class="check">from <input type="date" id="f-from"></label>
@@ -1458,8 +1560,8 @@ async function renderStandings(root) {
       <div id="standings-out" class="scroll"></div>
     </div>`;
 
-  let totals = allTime;
-  let range = [null, null];
+  let totals = defaultPreset === 'year' ? [] : allTime;
+  let range = defaultPreset === 'year' ? presets.year.range : [null, null];
   let view = [];
   function draw() {
     const major = el('f-major').value, gender = el('f-gender').value, cls = el('f-class').value;
@@ -1593,7 +1695,16 @@ async function renderStandings(root) {
       : 'shpe-standings-all-time.csv';
     a.click();
   };
-  draw();
+
+  if (defaultPreset === 'year') {
+    // Mirrors what f-preset's own onchange does for a manual pick, run once up front so the
+    // page opens already on "This year" instead of loading all-time and then re-fetching.
+    el('f-from').value = presets.year.range[0] || '';
+    el('f-to').value = presets.year.range[1] || '';
+    await applyRange(presets.year.range[0], presets.year.range[1]);
+  } else {
+    draw();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1601,7 +1712,7 @@ async function renderStandings(root) {
 // ---------------------------------------------------------------------------
 async function renderRoles(root) {
   const [roles, config] = await Promise.all([
-    get(`roles?year_id=eq.${state.currentYear}&select=netid,role,position_title&order=role`),
+    get(`roles?year_id=eq.${state.currentYear}&select=netid,role,position_title,people(first_name,last_name)&order=role`),
     get(`role_bonus_config?year_id=eq.${state.currentYear}&select=role,points&order=role`),
   ]);
 
@@ -1627,14 +1738,18 @@ async function renderRoles(root) {
       </div>
       ${roles.length === 0 ? '<div class="empty">Nobody set for this year.</div>' : `
       <div class="scroll"><table>
-        <thead><tr><th>netID</th><th>Role</th><th>Title</th><th></th></tr></thead>
-        <tbody>${roles.map((r) => `
+        <thead><tr><th>Name</th><th>netID</th><th>Role</th><th>Title</th><th></th></tr></thead>
+        <tbody>${roles.map((r) => {
+          const name = [r.people?.first_name, r.people?.last_name].filter(Boolean).join(' ');
+          return `
           <tr>
+            <td>${name ? esc(name) : blank('no name on file')}</td>
             <td><code>${esc(r.netid)}</code></td>
             <td>${esc(r.role)}</td>
             <td>${r.position_title ? esc(r.position_title) : blank()}</td>
             <td><button class="ghost" data-drop="${esc(r.netid)}|${esc(r.role)}">Remove</button></td>
-          </tr>`).join('')}</tbody>
+          </tr>`;
+        }).join('')}</tbody>
       </table></div>`}
       <div class="row" style="margin-top:18px">
         <button class="act" id="r-apply">Apply role bonuses</button>
@@ -1813,7 +1928,7 @@ async function renderAuditLog(root) {
         <thead><tr><th>Time</th><th>Actor</th><th>Summary</th><th>Table</th></tr></thead>
         <tbody>${rows.map((r) => `
           <tr>
-            <td>${esc(String(r.changed_at || '').replace('T', ' ').slice(0, 19))}</td>
+            <td>${esc(fmtCT(r.changed_at))}</td>
             <td>${r.changed_by ? esc(r.changed_by) : blank('unknown')}</td>
             <td style="white-space:normal">${esc(r.summary)}</td>
             <td><span class="pill">${esc(r.table_name)}</span></td>
@@ -2029,6 +2144,15 @@ async function boot() {
     // Membership pays no points and routes into member demographics rather than attendance — a
     // categorically different action from the other five. Sort it last (stable sort keeps the
     // rest in the label order the API returned) so typeButtons() never lets it blend in.
+    //
+    // state.eventTypes keeps all six codes, volunteer included — typeLabel() and the per-event
+    // <select>'s "selected" match both need to recognize an already-volunteer event correctly.
+    // What's excluded is narrower and lives at the two call sites that let someone newly *assign*
+    // a type (typeButtons() and renderEvents' per-row <select>): a form-sourced attendance row
+    // never has `hours` set, so tapping Volunteering on one there would silently restamp everyone
+    // on it to 0 points (events_restamp_attendance's `coalesce(hours, 0)`, event_point_sync.sql)
+    // with nothing on screen to say so. Volunteer events are only ever meant to be created from
+    // the dedicated Volunteering tab, which bypasses this list entirely.
     state.eventTypes = types.slice().sort((a, b) => Number(a.is_membership_form) - Number(b.is_membership_form));
     state.currentYear = config.find((c) => c.key === 'current_year_id')?.value;
     el('year-pill').textContent = state.currentYear || '';

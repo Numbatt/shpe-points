@@ -231,7 +231,15 @@ their side or in their cache.
 
 **"Nothing has ingested in days."** Sign in as the shared Gmail → script.google.com → open the
 poller project → **Executions**. Failures are visible there. Most common cause is an expired
-authorization after a Google account change; re-running `installTrigger` fixes it.
+authorization after a Google account change; re-running `installTrigger` fixes it (safe to re-run
+any number of times — it deletes its own existing trigger before creating a new one, so it can
+never create duplicates).
+
+**"What happens if a form gets deleted?"** Nothing you've already earned is at risk — points
+recorded from a form before it was deleted or moved stay exactly as they are, permanently. But
+nothing tells you it happened: there's no alert, and even the poller's own execution log stays
+silent about it. If a form's numbers look like they stopped updating, check that it's still sitting
+in its year's watched Drive folder.
 
 **"Someone shows up as 'no name on file'."** Names fill themselves in. A sign-in only carries a
 netID, so a first-time attendee arrives nameless, and ingestion then looks the name up in Rice's

@@ -314,8 +314,16 @@ cleanup, and a healthy pass that runs twice (e.g., a retried HTTP request) write
   (`apps-script/poller.js:277-283`) and logs the full response text — it never parses the array for
   per-form failures. A single form silently failing to write its attendance rows, inside an
   otherwise-successful pass, is visible only by reading the raw logged JSON in Executions.
+- **A form is deleted or moved out of its watched Drive folder.** The next pass's
+  `folder.getFilesByType(...)` walk (`apps-script/poller.js:157`) simply never sees it again — there
+  is no delete path anywhere in this system (`supabase/functions/`, `apps-script/`, and `scripts/`
+  all have zero statements that delete attendance or form rows), so every point already recorded
+  from that form is permanent and safe. But nothing marks it missing either: unlike the other three
+  gaps above, this one leaves no trace even in Apps Script → Executions — no log line, no skip
+  counter, nothing. The only symptom is that a form's per-pass response count quietly stops growing,
+  indistinguishable from the form simply having no new sign-ins.
 
-None of these three are persisted to a table an officer would ever look at. If ingestion looks
+None of these four are persisted to a table an officer would ever look at. If ingestion looks
 wrong for one specific form but Needs attention shows nothing, this is where to look next.
 
 ---
@@ -401,7 +409,8 @@ immediately.
 script.google.com → open the poller project → **Executions**. Per §6, folder-open failures,
 time-budget skips, and per-form errors are visible *only* here, not in any table. The most common
 real-world cause named in `RUNBOOK.md` is an expired Apps Script authorization after a Google
-account change, fixed by re-running `installTrigger`.
+account change, fixed by re-running `installTrigger` (it deletes every existing `pollForms` trigger
+before installing one, per `apps-script/poller.js:68-74`, so re-running is always safe).
 
 **Rolling the academic year.** This is a dashboard action, not a code change — the entire point of
 "the no-manual-changes rule" in `DESIGN.md`. An officer clicks the gear on the year switcher pill
